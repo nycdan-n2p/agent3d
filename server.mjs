@@ -63,7 +63,8 @@ function ensure(id) {
 // ---------- names: every agent gets a human first name; you can rename them ----------
 // Names are remembered per transcript file, so a session keeps its name across bridge restarts.
 const HUMAN_NAMES = ['Maya', 'Noah', 'Lior', 'Ava', 'Eli', 'Zoe', 'Omar', 'Nina', 'Theo', 'Ruby', 'Ari', 'Lena', 'Milo', 'Iris', 'Ezra', 'Tess',
-  'Jonah', 'Clara', 'Felix', 'Hana', 'Leo', 'Mira', 'Sam', 'Ivy', 'Oscar', 'Dana', 'Hugo', 'Yael', 'Max', 'Nora', 'Ben', 'Lila', 'Adam', 'Rosa', 'Kai', 'Talia'];
+  'Jonah', 'Clara', 'Felix', 'Hana', 'Leo', 'Mira', 'Sam', 'Ivy', 'Oscar', 'Dana', 'Hugo', 'Yael', 'Max', 'Nora', 'Ben', 'Lila', 'Adam', 'Rosa', 'Kai', 'Talia',
+  'Vera', 'Remy', 'Sol', 'Juno'];
 // Every name comes with a job. Ezra is always Security, Felix always UI / UX: the floor is a team of
 // specialists, and the manager routes work to whoever has the right job. "make <name> qa" overrides it.
 const NAME_ROLES = {};
@@ -73,11 +74,15 @@ for (const n of ['Nora', 'Nina', 'Tess', 'Theo', 'Ruby', 'Leo', 'Ivy', 'Talia'])
 // Jonah, Adam and Ben are planners: the manager takes a big request to one of them, and they break
 // it into parts the specialists do in parallel. A planner sits in Engineering.
 for (const n of ['Jonah', 'Adam', 'Ben']) NAME_ROLES[n] = 'planner';
+// Vera, Remy, Sol and Juno are video producers: they sit in UI / UX and make films with the
+// lemo-opuscar skill, asking for the whole brief in one go and splitting production between helpers.
+for (const n of ['Vera', 'Remy', 'Sol', 'Juno']) NAME_ROLES[n] = 'video';
 for (const n of HUMAN_NAMES) NAME_ROLES[n] ??= 'engineering';
 function roleOf(a) { return a.role || NAME_ROLES[String(a.humanName || '').split(' ')[0]] || 'engineering'; }
-function deptOfRole(r) { return r === 'planner' ? 'engineering' : r; }
+function deptOfRole(r) { return r === 'planner' ? 'engineering' : r === 'video' ? 'uiux' : r; }
+function isVideo(a) { return roleOf(a) === 'video'; }
 function isPlanner(a) { return roleOf(a) === 'planner'; }
-function applyRole(a) { const r = roleOf(a); const d = deptOfRole(r); if (a.dept !== d) { a.dept = d; a.deptReason = a.role ? 'assigned by you' : r === 'planner' ? `${a.humanName} is a planner` : `${a.humanName}'s job`; markDirty(); } }
+function applyRole(a) { const r = roleOf(a); const d = deptOfRole(r); if (a.dept !== d) { a.dept = d; a.deptReason = a.role ? 'assigned by you' : r === 'planner' ? `${a.humanName} is a planner` : r === 'video' ? `${a.humanName} is a video producer` : `${a.humanName}'s job`; markDirty(); } }
 const NAMES_FILE = path.join(__dirname, 'names.json');
 let savedNames = {}; // jsonlFile -> { humanName, nickname, role }
 try { savedNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')) || {}; } catch { /* none yet */ }
@@ -156,8 +161,8 @@ function lastToolUse(a) {
 function askFromToolUse(found) {
   let ask;
   if (found.name === 'AskUserQuestion' && Array.isArray(found.input?.questions) && found.input.questions.length) {
-    const q = found.input.questions[0];
-    ask = { kind: 'question', tool: found.name, question: q.question || '', header: q.header || '', multi: !!q.multiSelect, options: (q.options || []).map((o) => ({ label: o.label, description: o.description || '' })) };
+    const qs = found.input.questions.map((q) => ({ question: q.question || '', header: q.header || '', multi: !!q.multiSelect, options: (q.options || []).map((o) => ({ label: o.label, description: o.description || '' })) }));
+    ask = { kind: 'question', tool: found.name, ...qs[0], questions: qs }; // `questions` has them all; the first stays on top for the small screen
   } else if (WRAP_UP_TOOL.test(found.name) && found.input?.ask) {
     // Claude desktop app's end-of-turn box: the question lives in `ask`, the buttons in `actions`.
     const actions = Array.isArray(found.input.actions) ? found.input.actions : [];
@@ -204,9 +209,12 @@ const DEPT_RULES = [
   ['qa', /\b(tests?|testing|specs?|jest|vitest|mocha|pytest|unittest|playwright|cypress|selenium|coverage|lint|linter|eslint|ruff|flake8|tsc|typecheck|type-check|qa|e2e|regression|smoke|verify|verification|replay-qa)\b|\.(test|spec)\.[jt]sx?\b|_test\.(go|py)\b/i],
   ['uiux', /\.(css|scss|sass|less|html?|svg|vue|svelte)\b|\b(ui|ux|ui\/ux|design|designer|styling|styles?|stylesheet|layout|responsive|frontend|front-end|tailwind|figma|screenshot|mockup|wireframe|artifact|theme|dark mode|fonts?|typography|icons?|animation|three\.js|canvas)\b/i],
 ];
+// Video work goes to a video producer (a UI / UX job of its own): films, promos, explainers, animations.
+const VIDEO_RE = /\b(videos?|films?|short film|movie|promo|trailer|teaser|reel|explainer|animation|animated|motion graphics|storyboard|lemo[- ]?opuscar)\b/i;
+function jobForText(text) { return VIDEO_RE.test(text || '') ? 'video' : classifyText(text); }
 const DEPT_ALIASES = { eng: 'engineering', engineering: 'engineering', dev: 'engineering', qa: 'qa', test: 'qa', testing: 'qa', ui: 'uiux', ux: 'uiux', uiux: 'uiux', 'ui/ux': 'uiux', design: 'uiux', sec: 'security', security: 'security' };
-const JOB_ALIASES = { ...DEPT_ALIASES, planner: 'planner', planning: 'planner', plan: 'planner' };
-const JOB_NAMES = { ...DEPT_NAMES, planner: 'Planning' };
+const JOB_ALIASES = { ...DEPT_ALIASES, planner: 'planner', planning: 'planner', plan: 'planner', video: 'video', film: 'video', producer: 'video' };
+const JOB_NAMES = { ...DEPT_NAMES, planner: 'Planning', video: 'Video (UI / UX)' };
 function classifyText(text) { for (const [d, re] of DEPT_RULES) if (re.test(text || '')) return d; return null; }
 function setDept(a, dept, reason = '') {
   if (!dept || a.dept === dept) return false;
@@ -234,7 +242,7 @@ function humanText(rec) {
 function turnInfo(a) {
   if (!a.jsonlFile) return null;
   const text = readTail(a.jsonlFile); if (!text) return null;
-  const lines = text.split('\n'); const texts = []; let recap = ''; let prompt = '';
+  const lines = text.split('\n'); const texts = []; const files = []; let recap = ''; let prompt = '';
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]; if (!line.includes('"type"')) continue;
     let rec; try { rec = JSON.parse(line); } catch { continue; }
@@ -244,9 +252,10 @@ function turnInfo(a) {
     for (const b of content) {
       if (b.type === 'text' && b.text && b.text.trim()) texts.unshift(b.text.trim());
       if (b.type === 'tool_use' && WRAP_UP_TOOL.test(b.name) && b.input?.recap && !recap) recap = String(b.input.recap);
+      if (b.type === 'tool_use' && /^(Write|Edit|MultiEdit)$/.test(b.name) && typeof b.input?.file_path === 'string' && SCREEN_EXT.test(b.input.file_path)) files.push(b.input.file_path);
     }
   }
-  return { prompt, texts, recap };
+  return { prompt, texts, recap, files };
 }
 function classifyTurnStart(a) { // remember what the turn is about (shown on the agent's screen)
   setTimeout(() => { const info = turnInfo(a); if (info && info.prompt && info.prompt !== a.prompt) { a.prompt = info.prompt; markDirty(); } }, 400);
@@ -306,6 +315,22 @@ async function settleTask(issueId, r) {
 const chatLog = []; // the conversation with the floor manager, so it survives a reload
 function logChat(who, name, text, extra = {}) { chatLog.push({ t: Date.now(), who, name, text: String(text || '').slice(0, 4000), ...extra }); if (chatLog.length > 200) chatLog.shift(); }
 function playing(id) { return play.isActive() && (play.meta().players || []).some((p) => p.id === id); }
+// The questions in a reply, for the answer-all form: numbered or bulleted items that ask something,
+// else every sentence that ends in a question mark. Two or more and the office opens the big form.
+function extractQuestions(text) {
+  const clean = (s) => s.replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+  const lines = String(text || '').split('\n'); const items = []; let cur = null;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    const m = line.match(/^\s*(?:\d+[.)]|[-*•]|[a-z][.)])\s+(.*)$/i);
+    if (m) { cur = { text: m[1] }; items.push(cur); }
+    else if (!line.trim()) cur = null;
+    else if (cur) cur.text += ' ' + line.trim();
+  }
+  let qs = items.map((i) => clean(i.text)).filter((t) => /\?/.test(t));
+  if (qs.length < 2) qs = (String(text || '').match(/[^.!?\n]{12,}\?/g) || []).map(clean);
+  return [...new Set(qs)].slice(0, 20).map((q) => q.slice(0, 400));
+}
 function captureReport(a, attempt = 0) {
   if (!agents.has(a.id) || playing(a.id)) return;
   const info = turnInfo(a);
@@ -315,7 +340,8 @@ function captureReport(a, attempt = 0) {
     return; // nothing to report (no transcript yet, or a turn with no text)
   }
   const reply = pendingReplies.get(a.id); pendingReplies.delete(a.id); const hops = reply ? (reply.hops || 0) : 0;
-  const r = { id: ++reportSeq, agentId: a.id, name: agentName(a), dept: a.dept, t: Date.now(), prompt: info.prompt || a.prompt || '', text: text.slice(0, 6000), recap: info.recap.slice(0, 1000), asked: !!(a.awaitingInput || a.permission), replyTo: reply ? reply.text : null };
+  const r = { id: ++reportSeq, agentId: a.id, name: agentName(a), dept: a.dept, t: Date.now(), prompt: info.prompt || a.prompt || '', text: text.slice(0, 6000), recap: info.recap.slice(0, 1000), asked: !!(a.awaitingInput || a.permission), replyTo: reply ? reply.text : null, questions: extractQuestions(text) };
+  r.screens = collectScreens(info, text, r.id);
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
   logEvent(a, 'report', r.asked ? 'asked a question' : `filed a ${DEPT_NAMES[a.dept]} report`);
@@ -511,12 +537,12 @@ function findAgent(name) {
 function parseRequest(text) {
   const t = text.trim();
   let m;
-  if ((m = t.match(/^(?:new|start|launch|spawn|open|hire)\s+(?:an?\s+)?(?:new\s+)?(?:(qa|security|sec|engineering|eng|dev|ui\s*\/?\s*ux|ui|ux|design|test(?:ing)?)\s+)?(?:agent|specialist|engineer|person)\s+(?:in|at|for|on)\s+(\S+)\s*[:,-]?\s*(.*)$/i))) return { kind: 'launch', role: m[1] ? DEPT_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] : null, dir: m[2], prompt: m[3].trim() };
-  if ((m = t.match(/^(?:in|at)\s+(\S+)\s*[:,-]\s*(.+)$/i)) && !findAgent(m[1])) return { kind: 'launch', dir: m[1], prompt: m[2].trim() };
-  if ((m = t.match(/^@([^\s:,-]+)\s*[:,-]?\s*(.+)$/))) return { kind: 'agent', name: m[1], prompt: m[2].trim() };
-  if ((m = t.match(/^(?:tell|ask|have|get|let|make)\s+(?:the\s+)?(\S+?)(?:\s+agent)?\s+(?:to\s+)?(.+)$/i))) return { kind: 'agent', name: m[1].replace(/[:,]$/, ''), prompt: m[2].trim() };
+  if ((m = t.match(/^(?:new|start|launch|spawn|open|hire)\s+(?:an?\s+)?(?:new\s+)?(?:(qa|security|sec|engineering|eng|dev|ui\s*\/?\s*ux|ui|ux|design|test(?:ing)?|video|film)\s+)?(?:agent|specialist|engineer|person|producer)\s+(?:in|at|for|on)\s+(\S+)\s*[:,-]?\s*([\s\S]*)$/i))) return { kind: 'launch', role: m[1] ? JOB_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] : null, dir: m[2], prompt: m[3].trim() };
+  if ((m = t.match(/^(?:in|at)\s+(\S+)\s*[:,-]\s*([\s\S]+)$/i)) && !findAgent(m[1])) return { kind: 'launch', dir: m[1], prompt: m[2].trim() };
+  if ((m = t.match(/^@([^\s:,-]+)\s*[:,-]?\s*([\s\S]+)$/))) return { kind: 'agent', name: m[1], prompt: m[2].trim() };
+  if ((m = t.match(/^(?:tell|ask|have|get|let|make)\s+(?:the\s+)?(\S+?)(?:\s+agent)?\s+(?:to\s+)?([\s\S]+)$/i))) return { kind: 'agent', name: m[1].replace(/[:,]$/, ''), prompt: m[2].trim() };
   if ((m = t.match(/^(?:plan|project|big task|break (?:this |it )?down|split(?: this| it)?(?: up)?)\s*[:,-]\s*([\s\S]+)$/i))) return { kind: 'any', plan: true, prompt: m[1].trim() };
-  if ((m = t.match(/^(\S+?)\s*[:,]\s*(.+)$/))) return DEPT_ALIASES[m[1].toLowerCase()] ? { kind: 'any', prompt: t } : { kind: 'agent', name: m[1], prompt: m[2].trim() };
+  if ((m = t.match(/^(\S+?)\s*[:,]\s*([\s\S]+)$/))) return DEPT_ALIASES[m[1].toLowerCase()] ? { kind: 'any', prompt: t } : { kind: 'agent', name: m[1], prompt: m[2].trim() };
   // mention anywhere (whole word, so "same" is not Sam)
   for (const a of agents.values()) { const n = agentName(a).toLowerCase(); if (n.length > 2 && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return { kind: 'agent', name: n, prompt: t }; }
   return { kind: 'any', prompt: t };
@@ -654,7 +680,7 @@ function parseRename(text) {
   return m ? { name: m[1].replace(/^@/, ''), to: m[2].replace(/^["']|["']$/g, '') } : null;
 }
 function parseMove(text) {
-  const DEPT_WORDS = 'qa|security|sec|engineering|eng|dev|ui\\s*\\/?\\s*ux|ui|ux|design|test(?:ing)?|planner|planning';
+  const DEPT_WORDS = 'qa|security|sec|engineering|eng|dev|ui\\s*\\/?\\s*ux|ui|ux|design|test(?:ing)?|planner|planning|video|film|producer';
   const m = text.trim().match(new RegExp(`^(?:send|move|put|assign|transfer)\\s+(.+?)\\s+(?:to|into)\\s+(?:the\\s+)?(${DEPT_WORDS})(?:\\s+(?:dept|department|team|room|office))?\\s*[.!]?$`, 'i'))
     || text.trim().match(new RegExp(`^(?:make|set)\\s+(.+?)\\s+(?:an?\\s+|the\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'))
     || text.trim().match(new RegExp(`^(.+?)\\s+(?:is|should be|will be|becomes)\\s+(?:an?\\s+|the\\s+|our\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'));
@@ -674,7 +700,8 @@ const DEPT_SKILLS = {
     { skill: 'security-review', what: 'security review of the pending changes on the current branch', trigger: /\b(review (?:the |my )?(?:changes|diff|branch|pr)|pending changes)\b/i },
   ],
   uiux: [
-    { skill: 'frontend-design', what: 'distinctive, production-grade UI: pages, components, layouts, styling', trigger: /\b(design|restyle|style|styling|layout|ui|ux|component|page|landing|dashboard|theme|look|polish|beautif\w*)\b/i },
+    { skill: 'lemo-opuscar:lemo-opuscar', what: 'direct and produce a short film entirely in code, in one of 59 styles (oil painting, watercolor, ukiyo-e, satellite briefing, teardown…)', trigger: VIDEO_RE },
+    { skill: 'frontend-design', default: true, what: 'distinctive, production-grade UI: pages, components, layouts, styling', trigger: /\b(design|restyle|style|styling|layout|ui|ux|component|page|landing|dashboard|theme|look|polish|beautif\w*)\b/i },
     { skill: 'gpt-image-2-style-library', what: 'image-generation prompts and visual styles', trigger: /\b(image prompt|image style|generate an? image|illustration|poster|visual style)\b/i },
   ],
   qa: [
@@ -691,13 +718,37 @@ const DEPT_SKILLS = {
 function skillFor(dept, prompt, { defaultOk = true } = {}) {
   const list = DEPT_SKILLS[dept] || []; if (!list.length) return null;
   const hit = list.find((k) => k.trigger.test(prompt)); if (hit) return hit.skill;
-  if (defaultOk && dept !== 'engineering' && classifyText(prompt) === dept) return list[0].skill; // in-job work without a named skill: the job's default
+  if (defaultOk && dept !== 'engineering' && classifyText(prompt) === dept) return (list.find((k) => k.default) || list[0]).skill; // in-job work without a named skill: the job's default
   return null;
 }
 function withSkill(prompt, skill) { return skill && !/^\s*\//.test(prompt) ? `/${skill} ${prompt}` : prompt; }
+// ---------- screens: images you attach to a prompt, and the screenshots / wireframes agents hand back ----------
+const SCREENS_DIR = path.join(__dirname, 'screens');
+fs.mkdirSync(SCREENS_DIR, { recursive: true });
+const SCREEN_EXT = /\.(png|jpe?g|gif|webp|svg|html?)$/i;
+const SCREEN_RULE = `\n\n(Office rule: to show Daniel a screenshot, wireframe, mockup or page, save it as a PNG, JPG, SVG or HTML file under ${SCREENS_DIR} and name the path in your final reply; it goes up on his big screen.)`;
+function safeName(n) { return String(n || 'file').replace(/[^\w.-]+/g, '_').slice(-80); }
+// Files this turn produced or named that belong on the big screen: copied into screens/ and served from /screens/.
+function collectScreens(info, text, reportId) {
+  const cands = new Set(info.files || []);
+  for (const m of String(text || '').matchAll(/(?:\/|~\/)[^\s"'`<>()]+?\.(?:png|jpe?g|gif|webp|svg|html?)\b/gi)) cands.add(m[0].replace(/^~/, os.homedir()));
+  const out = [];
+  for (const f of cands) {
+    try {
+      const st = fs.statSync(f); if (!st.isFile() || st.size > 40e6) continue;
+      let name = path.basename(f);
+      if (!f.startsWith(SCREENS_DIR + path.sep)) { name = `out-${reportId}-${safeName(name)}`; fs.copyFileSync(f, path.join(SCREENS_DIR, name)); }
+      out.push({ name, url: `/screens/${encodeURIComponent(name)}`, kind: /\.html?$/i.test(name) ? 'html' : 'image' });
+    } catch { /* not there */ }
+    if (out.length >= 12) break;
+  }
+  return out;
+}
 const HANDOFF_RULE = '\n\n(Office rule: when you are done, if this needs follow-up by QA, Security or UI/UX, end your final reply with one line exactly like "HANDOFF: qa — <what they should do>", using qa, security or uiux.)';
-function pickSpecialist(dept, exceptId = null) {
-  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && a.dept === dept && !isPlanner(a) && !playing(a.id));
+// The video producer's standing orders: one round of questions, then split the production.
+const VIDEO_RULE = '\n\n(Office rule: you are the office\'s video producer. Make the film with the lemo-opuscar skill. Everything you need from Daniel goes in ONE message: a numbered list of questions, one per line, each ending with a question mark and followed by the default you will use if he skips it; then stop and wait for his answers. Never come back with a second round. Divide the production: run sub-agents in parallel for the voice, the music, the scenes and the render checks, and hand the finished film to QA with a HANDOFF line.)';
+function pickSpecialist(job, exceptId = null) { // job: a department, or 'video' for a video producer (who only takes video work)
+  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && !isPlanner(a) && !playing(a.id) && (job === 'video' ? isVideo(a) : a.dept === job && !isVideo(a)));
   pool.sort((p, q) => ((p.status === 'active' || p.permission || p.awaitingInput) - (q.status === 'active' || q.permission || q.awaitingInput)) || (q.lastEvent - p.lastEvent));
   return pool[0] || null;
 }
@@ -785,7 +836,7 @@ async function dispatchIssue(issue) {
   await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}), working in ${dir} on branch ${branch}.`]).catch(() => {});
   const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\nYou are working in your own git worktree (${dir}) on branch ${branch}. Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
   const skill = skillFor(dept, `${issue.title} ${issue.description || ''}`, { defaultOk: false }); // queued issues only run a skill they name
-  await typeInto(a.id, withSkill(prompt, skill) + HANDOFF_RULE);
+  await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + HANDOFF_RULE);
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   pendingReplies.set(a.id, { text: `queue: ${issue.title}`, t: Date.now(), issueId: issue.id, hops: 0, skill, queued: true });
   refreshIssues();
@@ -829,14 +880,14 @@ async function queueHandle(q) {
 }
 const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
 async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0 } = {}) {
-  const skill = skillFor(a.dept, prompt);
-  await typeInto(a.id, withSkill(prompt, skill) + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
+  const skill = isVideo(a) ? 'lemo-opuscar:lemo-opuscar' : skillFor(a.dept, prompt);
+  await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + (isVideo(a) ? VIDEO_RULE : '') + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   const issueId = await fileTask({ prompt: skill ? `/${skill} ${prompt}` : prompt, from, agent: a, discoveredFrom });
   pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops, skill });
   return issueId;
 }
-function skillNote(a, prompt) { const k = skillFor(a.dept, prompt); return k ? `, running /${k}` : ''; }
+function skillNote(a, prompt) { const k = isVideo(a) ? 'lemo-opuscar:lemo-opuscar' : skillFor(a.dept, prompt); return k ? `, running /${k}` : ''; }
 function parseHandoff(text) {
   const m = /HANDOFF:\s*(qa|security|uiux|ui\s*\/?\s*ux|engineering)\s*[—–:-]+\s*(.+)/i.exec(text || '');
   return m ? { dept: DEPT_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] || 'engineering', task: m[2].trim().slice(0, 1500) } : null;
@@ -1150,22 +1201,22 @@ async function managerHandle(text) {
       return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent${issueId ? ` and filed it as ${issueId}` : ''}.` : `New agent is up in ${path.basename(dir)}.` };
     } };
   }
-  if (req.kind === 'any' && (req.plan || wantsPlan(req.prompt))) return planHandle(req.prompt, text, !!req.plan);
+  if (req.kind === 'any' && !VIDEO_RE.test(req.prompt) && (req.plan || wantsPlan(req.prompt))) return planHandle(req.prompt, text, !!req.plan); // a video brief is long by nature: the producer splits it, not a planner
   let target = null;
   if (req.kind === 'agent') {
     target = findAgent(req.name);
     if (!target) { result.message = `Nobody here is called "${req.name}". Say "new agent in <folder>: <task>" and I'll bring someone in.`; return { result, deliver: null }; }
   } else { // nobody named: the job the task needs decides who gets it
-    const dept = classifyText(req.prompt) || 'engineering';
+    const dept = jobForText(req.prompt) || 'engineering';
     target = pickSpecialist(dept);
     if (!target) {
-      if (!upstream.privileged) { result.message = `No ${DEPT_NAMES[dept]} specialist on the floor, and the bridge is read-only so I can't bring one in.`; return { result, deliver: null }; }
+      if (!upstream.privileged) { result.message = `No ${JOB_NAMES[dept]} specialist on the floor, and the bridge is read-only so I can't bring one in.`; return { result, deliver: null }; }
       const dir = homeDirFor(null);
-      result.ok = true; result.action = 'launch'; result.message = `No ${DEPT_NAMES[dept]} specialist is free. Bringing one in to ${path.basename(dir)}…`;
+      result.ok = true; result.action = 'launch'; result.message = dept === 'video' ? `No video producer is free. Bringing one in to ${path.basename(dir)}…` : `No ${DEPT_NAMES[dept]} specialist is free. Bringing one in to ${path.basename(dir)}…`;
       return { result, deliver: async () => {
         const a = await launchSpecialist(dept, dir);
         const issueId = await giveTask(a, req.prompt, text);
-        return { targetId: a.id, message: `${agentName(a)} joined as ${DEPT_NAMES[dept]} in ${path.basename(dir)} and is on it${skillNote(a, req.prompt)}${issueId ? ` (${issueId})` : ''}.` };
+        return { targetId: a.id, message: `${agentName(a)} joined as ${dept === 'video' ? 'video producer' : DEPT_NAMES[dept]} in ${path.basename(dir)} and is on it${skillNote(a, req.prompt)}${issueId ? ` (${issueId})` : ''}.` };
       } };
     }
   }
@@ -1182,8 +1233,8 @@ async function managerHandle(text) {
 }
 
 // ---------- http ----------
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' };
-function readBody(req) { return new Promise((resolve) => { let b = ''; req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy(); }); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); }); }
+const MIME = { '.html': 'text/html', '.htm': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+function readBody(req, max = 1e6) { return new Promise((resolve) => { let b = ''; req.on('data', (c) => { b += c; if (b.length > max) req.destroy(); }); req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } }); }); }
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
 
 // ---------- access control ----------
@@ -1221,19 +1272,42 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/state') return json(res, 200, snapshot());
   if (url.pathname === '/api/manager' && req.method === 'POST') {
-    const { text } = await readBody(req);
-    if (!text || typeof text !== 'string') return json(res, 400, { ok: false, message: 'say something' });
+    const body = await readBody(req);
+    let text = typeof body.text === 'string' ? body.text : '';
+    const images = (Array.isArray(body.images) ? body.images : []).filter((u) => typeof u === 'string' && /^\/screens\/[^/]+$/.test(u)).slice(0, 10);
+    if (!text.trim() && !images.length) return json(res, 400, { ok: false, message: 'say something' });
+    const shown = text.slice(0, 12000);
+    if (images.length) text = (shown.trim() || 'Look at the attached image.') + `\n\nAttached ${images.length === 1 ? 'image' : 'images'} (read ${images.length === 1 ? 'it' : 'them'} with the Read tool): ` + images.map((u) => path.join(SCREENS_DIR, decodeURIComponent(u.slice('/screens/'.length)))).join(' , ');
+    else text = shown;
     try {
-      const { result, deliver } = await managerHandle(text.slice(0, 4000));
+      const { result, deliver } = await managerHandle(text);
       json(res, 200, result);
-      logChat('you', 'you', text); logChat('manager', 'floor manager', result.message, { ok: result.ok, action: result.action });
-      fx('managerSay', result.targetId, { text, message: result.message, ok: result.ok, action: result.action, pending: !!deliver });
+      logChat('you', 'you', shown, images.length ? { images } : {}); logChat('manager', 'floor manager', result.message, { ok: result.ok, action: result.action });
+      fx('managerSay', result.targetId, { text: shown, images, message: result.message, ok: result.ok, action: result.action, pending: !!deliver });
       if (deliver) {
         deliver().then((r) => { logChat('manager', 'floor manager', r.message, { ok: true }); fx('managerDone', r.targetId, { ok: true, message: r.message, text }); })
           .catch((e) => { const message = `That didn't work: ${e.message}`; logChat('manager', 'floor manager', message, { ok: false }); fx('managerDone', result.targetId, { ok: false, message, text }); });
       }
     } catch (e) { json(res, 500, { ok: false, message: e.message }); }
     return;
+  }
+  if (url.pathname === '/api/upload' && req.method === 'POST') { // an image for a prompt: { name, data: dataURL }
+    const { name, data } = await readBody(req, 40e6);
+    const m = /^data:(image\/(png|jpeg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=]+)$/.exec(String(data || ''));
+    if (!m) return json(res, 400, { ok: false, message: 'send a PNG, JPG, GIF, WEBP or SVG' });
+    const ext = { png: '.png', jpeg: '.jpg', gif: '.gif', webp: '.webp', 'svg+xml': '.svg' }[m[2]];
+    const base = safeName(String(name || 'image').replace(/\.[^.]*$/, '')) || 'image';
+    const file = `in-${Date.now()}-${base}${ext}`;
+    fs.writeFileSync(path.join(SCREENS_DIR, file), Buffer.from(m[3], 'base64'));
+    return json(res, 200, { ok: true, url: `/screens/${encodeURIComponent(file)}`, name: file });
+  }
+  if (url.pathname.startsWith('/screens/')) { // what you attached and what the agents handed back
+    const name = path.basename(decodeURIComponent(url.pathname.slice('/screens/'.length)));
+    const file = path.join(SCREENS_DIR, name);
+    return fs.readFile(file, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('not found'); }
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data);
+    });
   }
   if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk, skills: Object.fromEntries(Object.entries(DEPT_SKILLS).map(([d, ks]) => [d, ks.map((k) => ({ skill: k.skill, what: k.what }))])) });
   if (url.pathname === '/api/issues') return json(res, 200, { ok: true, issues: await refreshIssues(), beads: beadsOk });
@@ -1257,6 +1331,25 @@ const server = http.createServer(async (req, res) => {
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/terminal$/))) {
     const id = Number(m[1]); const a = agents.get(id);
     return json(res, 200, { hasTerminal: !!a?.hasTerminal, text: terminalText(id) });
+  }
+  if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/answers$/)) && req.method === 'POST') {
+    // One answer per question of an AskUserQuestion: { option: <1-based index> } picks a button,
+    // { text } types into its "Other" slot. Claude Code walks the questions one after the other and
+    // ends on a submit step, so the answers are typed in order with a pause between them.
+    const id = Number(m[1]); const a = agents.get(id); const body = await readBody(req); const answers = Array.isArray(body.answers) ? body.answers : [];
+    const qs = a?.ask?.questions || (a?.ask ? [a.ask] : []);
+    if (!a || !qs.length) return json(res, 400, { ok: false, message: 'that agent is not asking anything' });
+    try {
+      for (let i = 0; i < qs.length; i++) {
+        const ans = answers[i] || {}; const q = qs[i];
+        if (ans.text && String(ans.text).trim()) { await typeInto(id, String(q.options.length + 1), true); await sleep(500); await typeInto(id, String(ans.text).trim(), true); }
+        else await typeInto(id, String(ans.option || 1), true);
+        await sleep(600);
+      }
+      if (qs.length > 1) await typeInto(id, '\r', false); // the submit step after the last question
+      logEvent(a, 'manager', `you answered ${qs.length} question${qs.length === 1 ? '' : 's'}`);
+      return json(res, 200, { ok: true });
+    } catch (e) { return json(res, 400, { ok: false, message: e.message }); }
   }
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/input$/)) && req.method === 'POST') {
     const id = Number(m[1]); const { data, enter } = await readBody(req);

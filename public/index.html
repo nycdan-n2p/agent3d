@@ -73,8 +73,35 @@
   #detail .reply button { padding: 4px 7px; font-size: 11px; }
   #chat { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(640px, calc(100vw - 300px)); display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-color: rgba(255,176,32,0.45); }
   #chat .hat { font-size: 20px; }
-  #chat input { flex: 1; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 8px 10px; }
-  #chat input:focus { outline: none; border-color: rgba(255,176,32,0.7); }
+  #chat { align-items: flex-end; }
+  #chat .box { flex: 1; min-width: 0; display: flex; flex-direction: column; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; }
+  #chat .box:focus-within { border-color: rgba(255,176,32,0.7); }
+  #chat.drop .box { border-color: rgba(57,217,138,0.9); background: rgba(57,217,138,0.08); }
+  #chat textarea { font: inherit; font-size: 13px; line-height: 1.4; color: var(--ink); background: transparent; border: 0; padding: 8px 10px; resize: none; min-height: 36px; max-height: 42vh; overflow-y: auto; width: 100%; box-sizing: border-box; }
+  #chat textarea:focus { outline: none; }
+  #chat #attach { display: none; gap: 6px; flex-wrap: wrap; padding: 8px 8px 0; }
+  #chat #attach.has { display: flex; }
+  #chat #attach .th { position: relative; width: 56px; height: 56px; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2); background: #000; }
+  #chat #attach .th img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #chat #attach .th .x { position: absolute; top: 1px; right: 1px; width: 16px; height: 16px; border-radius: 50%; background: rgba(0,0,0,0.75); color: #fff; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
+  #chat #attach .th.up { opacity: 0.5; }
+  #chat #btnFile { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.1); padding: 6px 8px; }
+  #log .msg .pics { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  #log .msg .pics img, #reports .rep .shots img, #reports .rep .shots .doc { width: 72px; height: 54px; object-fit: cover; border-radius: 5px; border: 1px solid rgba(255,255,255,0.2); cursor: zoom-in; background: #000; }
+  #reports .rep .shots { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  #reports .rep .shots .doc { display: grid; place-items: center; font-size: 20px; color: var(--ink); }
+  #screen { position: fixed; inset: 0; z-index: 30; display: none; flex-direction: column; background: rgba(4,5,12,0.9); backdrop-filter: blur(6px); }
+  #screen.show { display: flex; }
+  #screen .sh { display: flex; align-items: center; gap: 10px; padding: 10px 16px; font-size: 13px; }
+  #screen .sh b { font-size: 14px; }
+  #screen .sh .sp { flex: 1; }
+  #screen .sh button { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); color: var(--ink); border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; }
+  #screen .sb { flex: 1; min-height: 0; display: grid; place-items: center; padding: 0 16px 16px; }
+  #screen .sb img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 0 80px rgba(255,176,32,0.18); }
+  #screen .sb iframe { width: 100%; height: 100%; border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; background: #fff; }
+  #screen .sf { display: flex; justify-content: center; gap: 6px; padding: 0 16px 12px; }
+  #screen .sf .dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.25); cursor: pointer; }
+  #screen .sf .dot.on { background: #ffb020; }
   #chat button { background: rgba(255,176,32,0.25); border-color: rgba(255,176,32,0.6); }
   #toast { bottom: 70px; }
   @media (max-width: 900px) { #roster { max-height: 26vh; } #chat { width: calc(100vw - 28px); } #help { display: none; } }
@@ -214,7 +241,12 @@
   </div>
   <form id="chat" class="panel">
     <span class="hat">👷</span>
-    <input id="chatInput" placeholder="Tell the floor manager… “status”, “what is guide-library doing”, “send X to QA”, “new agent in <folder>: <task>”" autocomplete="off" />
+    <div class="box">
+      <div id="attach"></div>
+      <textarea id="chatInput" rows="1" placeholder="Tell the floor manager… “status”, “send X to QA”, “new agent in <folder>: <task>”. Enter sends, Shift+Enter for a new line, paste or drop images." autocomplete="off"></textarea>
+    </div>
+    <input type="file" id="chatFile" accept="image/*" multiple hidden />
+    <button type="button" id="btnFile" title="Attach images (or paste / drop them)">📎</button>
     <button type="button" id="btnMic" title="Hold the floor: speak and the whole office hears the voice of god">🎙</button>
     <button type="button" id="btnLog" title="Show the conversation">💬</button>
     <button type="submit">send</button>
@@ -224,6 +256,7 @@
     <div class="bm"><div class="bq" id="bText"></div><div class="bf" id="bForm"></div></div>
     <div class="bt"><span id="bHint"></span><button type="button" id="bLater">later</button><button type="button" class="send" id="bSend">send all answers ⏎</button></div>
   </div></div>
+  <div id="screen"><div class="sh"><span class="chip" id="sChip"></span><b id="sTitle"></b><span id="sName"></span><span class="sp"></span><button type="button" id="sPrev">‹ prev</button><button type="button" id="sNext">next ›</button><a id="sOpen" target="_blank" rel="noopener"><button type="button">open ↗</button></a><button type="button" id="sClose">✕ esc</button></div><div class="sb" id="sBody"></div><div class="sf" id="sDots"></div></div>
   <div id="god"></div>
   <div id="toast"></div>
   <div id="empty"><div>No agents yet.<br/>Start the Pixel Agents server with <code>npx pixel-agents --port 4848</code><br/>and open a Claude Code session anywhere on this Mac.</div></div>

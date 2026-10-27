@@ -1003,6 +1003,7 @@ function logChat(m, { show = true } = {}) {
   const el = document.createElement('div'); el.className = `msg ${m.who}${m.ok === false ? ' bad' : ''}`;
   const who = document.createElement('span'); who.className = 'who'; who.textContent = m.who === 'you' ? 'you' : m.who === 'agent' ? `${m.name} · ${deptOf(m.dept).name} report` : 'floor manager'; el.appendChild(who);
   el.appendChild(document.createTextNode(mdLite(m.text)));
+  if (m.images?.length) { const p = document.createElement('div'); p.className = 'pics'; for (const u of m.images) { const im = document.createElement('img'); im.src = u; im.onclick = () => openScreen([{ url: u, kind: 'image', name: u.split('/').pop() }], { name: 'you', dept: null, title: 'your image' }); p.appendChild(im); } el.appendChild(p); }
   logBody.appendChild(el); while (logBody.children.length > 200) logBody.firstChild.remove();
   if (show) logPanel.classList.add('show');
   logBody.scrollTop = logBody.scrollHeight;
@@ -1010,6 +1011,30 @@ function logChat(m, { show = true } = {}) {
 function mdLite(s) { return String(s || '').replace(/^#{1,6}\s+/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').trim(); }
 $('#logClose').onclick = () => logPanel.classList.remove('show');
 $('#btnLog').onclick = () => { logPanel.classList.toggle('show'); logBody.scrollTop = logBody.scrollHeight; };
+// ---------- the big screen: a screenshot, wireframe or page an agent handed you, full screen until you press esc ----------
+const screenEl = $('#screen'); let screen = null; // { items, i, from }
+function openScreen(items, from, i = 0) {
+  if (!items?.length) return;
+  screen = { items, i: Math.max(0, Math.min(i, items.length - 1)), from };
+  $('#sChip').style.display = from?.dept ? '' : 'none'; if (from?.dept) { $('#sChip').textContent = deptOf(from.dept).name; $('#sChip').style.background = deptHex(from.dept); }
+  $('#sName').textContent = from?.name ? `from ${from.name}` : '';
+  screenEl.classList.add('show'); renderScreen();
+}
+function renderScreen() {
+  if (!screen) return;
+  const it = screen.items[screen.i]; const body = $('#sBody'); body.innerHTML = '';
+  $('#sTitle').textContent = it.name; $('#sOpen').href = it.url;
+  if (it.kind === 'html') { const f = document.createElement('iframe'); f.sandbox = 'allow-scripts allow-same-origin'; f.src = it.url; body.appendChild(f); }
+  else { const im = document.createElement('img'); im.src = it.url; im.alt = it.name; body.appendChild(im); }
+  const many = screen.items.length > 1; $('#sPrev').style.display = $('#sNext').style.display = many ? '' : 'none';
+  $('#sDots').innerHTML = many ? screen.items.map((_, j) => `<span class="dot${j === screen.i ? ' on' : ''}" data-j="${j}"></span>`).join('') : '';
+}
+function closeScreen() { screen = null; screenEl.classList.remove('show'); $('#sBody').innerHTML = ''; }
+function stepScreen(d) { if (!screen) return; screen.i = (screen.i + d + screen.items.length) % screen.items.length; renderScreen(); }
+$('#sClose').onclick = closeScreen; $('#sPrev').onclick = () => stepScreen(-1); $('#sNext').onclick = () => stepScreen(1);
+$('#sDots').onclick = (e) => { if (e.target.dataset.j !== undefined) { screen.i = Number(e.target.dataset.j); renderScreen(); } };
+screenEl.addEventListener('click', (e) => { if (e.target === $('#sBody')) closeScreen(); }); // click the dark around it to close
+window.__officeScreen = (urls) => openScreen((urls || ['/favicon.svg']).map((u) => ({ url: u, kind: /\.html?$/.test(u) ? 'html' : 'image', name: u.split('/').pop() })), { name: 'debug', dept: 'uiux' }); // debug hook
 // ---------- the reports inbox ----------
 const reportsPanel = $('#reports'), rList = $('#rList'), rBadge = $('#rBadge'), rCount = $('#rCount');
 const reportsById = new Map(); let unread = 0;
@@ -1028,8 +1053,8 @@ function addReportRow(r, fresh) {
   const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id;
   const body = mdLite(r.text) || mdLite(r.recap) || '(no text in this turn)';
   el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b><span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
-    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>${(r.questions || []).length ? `<button type="button" class="ra">📝 answer ${r.questions.length === 1 ? 'the question' : `all ${r.questions.length} questions`}</button>` : ''}`;
-  el.onclick = (e) => { if (e.target.classList.contains('ra')) { e.stopPropagation(); openBriefForReport(r); return; } el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
+    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>${(r.screens || []).length ? `<div class="shots">${r.screens.map((sc, i) => sc.kind === 'html' ? `<div class="doc" data-i="${i}" title="${escapeHtml(sc.name)}">🖥</div>` : `<img data-i="${i}" src="${sc.url}" alt="${escapeHtml(sc.name)}" />`).join('')}</div>` : ''}${(r.questions || []).length ? `<button type="button" class="ra">📝 answer ${r.questions.length === 1 ? 'the question' : `all ${r.questions.length} questions`}</button>` : ''}`;
+  el.onclick = (e) => { if (e.target.classList.contains('ra')) { e.stopPropagation(); openBriefForReport(r); return; } if (e.target.dataset.i !== undefined && e.target.closest('.shots')) { e.stopPropagation(); openScreen(r.screens, r, Number(e.target.dataset.i)); return; } el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
   rList.prepend(el); while (rList.children.length > 100) rList.lastChild.remove();
   if (fresh) unread++; renderBadge();
 }
@@ -1037,6 +1062,7 @@ setInterval(() => { for (const sp of rList.querySelectorAll('.ago[data-t]')) sp.
 // An agent hands in a report: it lands on the tray, in the inbox, in the log when it answers you, and you get a notice.
 function handInReport(r, av, walked) {
   addSheet(r.dept); addReportRow(r, true);
+  if (r.screens?.length) openScreen(r.screens, r); // straight onto the big screen; esc when you're done
   if (walked) burstConfetti(OFFICE.tray.x, 1.4, OFFICE.tray.z, deptOf(r.dept).color);
   const head = mdLite(r.text || r.recap).split('\n').find((l) => l.trim()) || '';
   toast(`${r.name} dropped off a report: ${head}`, { notice: true, chip: r.dept, onclick: () => openReports(r.id) });
@@ -1292,7 +1318,9 @@ $('#btnNight').onclick = (e) => { nightTarget = nightTarget ? 0 : 1; e.target.te
 $('#btnNight').classList.add('on');
 $('#btnReset').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(HOME); controls.target.copy(HOME_TARGET); renderRoster(lastAgents); };
 $('#btnOverview').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(OVERVIEW); controls.target.copy(OVERVIEW_TARGET); renderRoster(lastAgents); };
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (briefPanel.classList.contains('show')) { closeBrief(); return; } endReveal(); endBoardZoom(); followId = null; renderRoster(lastAgents); } });
+addEventListener('keydown', (e) => {
+  if (screen) { if (e.key === 'Escape') closeScreen(); else if (e.key === 'ArrowLeft') stepScreen(-1); else if (e.key === 'ArrowRight') stepScreen(1); return; }
+  if (e.key === 'Escape') { if (briefPanel.classList.contains('show')) { closeBrief(); return; } endReveal(); endBoardZoom(); followId = null; renderRoster(lastAgents); } });
 // click to follow
 const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
@@ -1362,7 +1390,7 @@ function applyFx(f) {
   if (f.kind === 'dept') { if (av) { av.decide(); pushFeed('dept', name, `→ ${deptOf(f.dept).name}`); } return; }
   if (f.kind === 'report') { if (f.report) { if (av) av.file(f.report); else handInReport(f.report, null, false); } return; }
   if (f.kind === 'managerSay') {
-    logChat({ who: 'you', name: 'you', text: f.text }); logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });
+    logChat({ who: 'you', name: 'you', text: f.text, images: f.images || [] }); logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });
     manager.task = { targetId: f.id, pendingTarget: null, text: f.action === 'move' ? f.message : f.text, phase: 'walk', until: 0, pending: !!f.pending };
     if (f.action === 'answer') { manager.task = null; manager.say(f.message.split('\n')[0], { ms: 8000 }); manager.jumpV = 1.6; }
     else if (manager.huddling) { manager.task = null; if (f.action !== 'queue') manager.say(f.message.split('\n')[0], { ms: 6000 }); } // stay in the huddle; the parts go out from here
@@ -1405,12 +1433,40 @@ function applyFx(f) {
     default: break;
   }
 }
+// ---------- the prompt: a box that grows, Enter sends, images ride along ----------
+const chatInput = $('#chatInput'); const attachEl = $('#attach'); const attachments = []; // { file, url (data), uploaded: '/screens/..' | null, el }
+function growInput() { chatInput.style.height = 'auto'; chatInput.style.height = Math.min(chatInput.scrollHeight, innerHeight * 0.42) + 'px'; }
+chatInput.addEventListener('input', growInput);
+chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#chat').requestSubmit(); } });
+function addAttachment(file) {
+  if (!file || !/^image\//.test(file.type) || attachments.length >= 10) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const at = { file, data: rd.result, uploaded: null, el: document.createElement('div') };
+    at.el.className = 'th up'; at.el.innerHTML = `<img alt="" /><span class="x" title="remove">✕</span>`; at.el.querySelector('img').src = at.data;
+    at.el.querySelector('.x').onclick = () => { attachments.splice(attachments.indexOf(at), 1); at.el.remove(); attachEl.classList.toggle('has', attachments.length > 0); };
+    attachments.push(at); attachEl.appendChild(at.el); attachEl.classList.add('has');
+    api('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: file.name, data: at.data }) }).then((r) => r.json())
+      .then((j) => { if (j.ok) { at.uploaded = j.url; at.el.classList.remove('up'); } else { toast(j.message || 'upload failed'); at.el.querySelector('.x').click(); } })
+      .catch(() => { toast('upload failed — bridge offline?'); at.el.querySelector('.x').click(); });
+  };
+  rd.readAsDataURL(file);
+}
+$('#btnFile').onclick = () => $('#chatFile').click();
+$('#chatFile').onchange = (e) => { for (const f of e.target.files) addAttachment(f); e.target.value = ''; };
+chatInput.addEventListener('paste', (e) => { const files = [...(e.clipboardData?.files || [])].filter((f) => /^image\//.test(f.type)); if (files.length) { e.preventDefault(); files.forEach(addAttachment); } });
+for (const ev of ['dragenter', 'dragover']) $('#chat').addEventListener(ev, (e) => { e.preventDefault(); $('#chat').classList.add('drop'); });
+for (const ev of ['dragleave', 'drop']) $('#chat').addEventListener(ev, (e) => { e.preventDefault(); $('#chat').classList.remove('drop'); if (e.type === 'drop') for (const f of e.dataTransfer.files) addAttachment(f); });
 $('#chat').onsubmit = (e) => {
   e.preventDefault();
-  const input = $('#chatInput'); const text = input.value.trim(); if (!text) return; input.value = '';
-  if (/^(?:open|show|see)\s+(?:the\s+)?(?:reports?|inbox)$/i.test(text)) { openReports(); return; }
-  if (/^(?:close|hide)\s+(?:the\s+)?(?:reports?|inbox)$/i.test(text)) { closeReports(); return; }
-  askManager(text);
+  const text = chatInput.value.trim();
+  if (!text && !attachments.length) return;
+  if (attachments.some((a) => !a.uploaded)) { toast('still uploading your image…'); return; }
+  const images = attachments.map((a) => a.uploaded);
+  chatInput.value = ''; growInput(); attachments.length = 0; attachEl.innerHTML = ''; attachEl.classList.remove('has');
+  if (!images.length && /^(?:open|show|see)\s+(?:the\s+)?(?:reports?|inbox)$/i.test(text)) { openReports(); return; }
+  if (!images.length && /^(?:close|hide)\s+(?:the\s+)?(?:reports?|inbox)$/i.test(text)) { closeReports(); return; }
+  askManager(text, images);
 };
 $('#btnPlay').onclick = () => askManager(lastPlay?.active ? 'stop playing' : 'play');
 
@@ -1463,9 +1519,9 @@ micBtn.onclick = () => {
 };
 window.__officeGod = (text, send = false) => { voiceOfGod(text || 'Finish the build. Then rest.', { send }); return 'ok'; }; // debug hook: no microphone needed
 
-async function askManager(text) {
+async function askManager(text, images = []) {
   manager.say('On it!', { ms: 3000 }); manager.jumpV = 2.4;
-  try { const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); if (!r.ok) toast('the floor manager is not answering'); }
+  try { const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, images }) }); if (!r.ok) toast('the floor manager is not answering'); }
   catch { toast('bridge offline — run `npm start`'); }
 }
 function connect() {
