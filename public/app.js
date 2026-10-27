@@ -208,6 +208,35 @@ function drawBoard(agents) {
   boardTex.needsUpdate = true;
 }
 function rank(w) { return w === 'permission' ? 0 : w === 'question' ? 1 : w === 'work' ? 2 : 3; }
+// ---------- task board (beads issues) on the left wall ----------
+const taskCanvas = document.createElement('canvas'); taskCanvas.width = 1100; taskCanvas.height = 560;
+const taskTex = new THREE.CanvasTexture(taskCanvas); taskTex.colorSpace = THREE.SRGBColorSpace;
+const taskMaterial = new THREE.MeshStandardMaterial({ map: taskTex, emissiveMap: taskTex, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.4 });
+let lastIssues = []; let beadsOn = false; let taskSig = '';
+const PRIO_COLORS = ['#ff4d6d', '#ffb020', '#4ea1ff', '#8b92b8', '#5c6390'];
+function drawTaskBoard(force = false) {
+  const sig = JSON.stringify([beadsOn, lastIssues]); if (!force && sig === taskSig) return; taskSig = sig;
+  const c = taskCanvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
+  ctx.fillStyle = '#0b0a14'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffb020'; ctx.fillRect(0, 0, W, 6);
+  ctx.font = `bold 26px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.fillText('TASK BOARD', 28, 22);
+  ctx.font = `18px ${mono}`; ctx.fillStyle = '#8b92b8'; ctx.textAlign = 'right';
+  ctx.fillText(beadsOn ? `${lastIssues.length} open · beads` : 'no beads database here', W - 28, 26); ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(28, 62, W - 56, 2);
+  if (!lastIssues.length) { ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(beadsOn ? 'board is clear' : 'run `bd init` in the project folder', 28, 84); }
+  lastIssues.slice(0, 12).forEach((i, k) => {
+    const y = 80 + k * 39; const col = PRIO_COLORS[Math.min(4, i.priority)] || '#8b92b8';
+    ctx.fillStyle = col; roundRect(ctx, 28, y + 6, 42, 24, 6); ctx.fill();
+    ctx.fillStyle = '#0b0d17'; ctx.font = `bold 16px ${mono}`; ctx.fillText(`P${i.priority}`, 36, y + 10);
+    ctx.fillStyle = i.status === 'in_progress' ? '#39d98a' : '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(i.status === 'in_progress' ? '◐' : '○', 82, y + 8);
+    ctx.fillStyle = '#8b92b8'; ctx.font = `16px ${mono}`; ctx.fillText(i.id.slice(-8), 110, y + 11);
+    ctx.fillStyle = '#e8ecff'; ctx.font = `19px ${mono}`; ctx.fillText(i.title.slice(0, 60) + (i.title.length > 60 ? '…' : ''), 215, y + 9);
+    if (i.assignee) { ctx.fillStyle = '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText(i.assignee.slice(0, 14), W - 28, y + 12); ctx.textAlign = 'left'; }
+  });
+  if (lastIssues.length > 12) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${lastIssues.length - 12} more`, 28, 80 + 12 * 39); }
+  taskTex.needsUpdate = true;
+}
+drawTaskBoard(true);
 setInterval(() => drawBoard(lastAgents), 1000);
 
 function buildRoom() {
@@ -264,6 +293,9 @@ function buildRoom() {
   const frame = new THREE.Mesh(new THREE.BoxGeometry(18.4, 4.4, 0.25), mat(0x0d0f20, { metalness: 0.4, roughness: 0.5 })); frame.position.set(2, 4.0, -ROOM.d / 2 + 2.15); scene.add(frame);
   const win = new THREE.Mesh(new THREE.PlaneGeometry(18, 4.0), boardMaterial);
   win.position.set(2, 4.0, -ROOM.d / 2 + 2.29); scene.add(win);
+  // task board on the left wall, by the Engineering bay
+  const tframe = new THREE.Mesh(new THREE.BoxGeometry(0.25, 4.2, 8.2), mat(0x0d0f20, { metalness: 0.4, roughness: 0.5 })); tframe.position.set(-ROOM.w / 2 + 0.33, 3.6, -3.9); scene.add(tframe);
+  const tboard = new THREE.Mesh(new THREE.PlaneGeometry(7.9, 4.0), taskMaterial); tboard.rotation.y = Math.PI / 2; tboard.position.set(-ROOM.w / 2 + 0.47, 3.6, -3.9); scene.add(tboard);
   // baseboard neon strip
   const strip = new THREE.Mesh(new THREE.BoxGeometry(ROOM.w, 0.08, 0.08), new THREE.MeshStandardMaterial({ color: 0x7c5cff, emissive: 0x7c5cff, emissiveIntensity: 2.5 }));
   strip.position.set(0, 0.06, -ROOM.d / 2 + 2.25); scene.add(strip);
@@ -834,7 +866,7 @@ function addReportRow(r, fresh) {
   const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id;
   const body = mdLite(r.text) || mdLite(r.recap) || '(no text in this turn)';
   el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b><span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
-    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>`;
+    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>`;
   el.onclick = () => { el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
   rList.prepend(el); while (rList.children.length > 100) rList.lastChild.remove();
   if (fresh) unread++; renderBadge();
@@ -855,6 +887,7 @@ async function loadHistory() {
     const h = await (await api('/api/history')).json();
     for (const r of h.reports || []) addReportRow(r, false);
     for (const m of h.chat || []) logChat(m, { show: false });
+    if (h.issues) { lastIssues = h.issues; beadsOn = !!h.beads; drawTaskBoard(); }
     for (const r of (h.reports || []).slice(-TRAY_MAX)) addSheet(r.dept);
   } catch { /* bridge offline */ }
 }
@@ -960,7 +993,7 @@ function renderDetail() {
   const html = askHtml + `
       <div class="now ${stClass}${w === 'work' ? ' cursor' : ''}">${escapeHtml(nowText)} </div>
       <div class="kv">
-        <span>department</span><b><select class="deptSel" title="${escapeHtml(a.deptReason || '')}">${DEPT_ORDER.map((k) => `<option value="${k}"${k === (a.dept || 'engineering') ? ' selected' : ''}>${escapeHtml(DEPTS[k].name)}</option>`).join('')}</select>${a.deptReason ? ` <span style="color:var(--dim)">· ${escapeHtml(a.deptReason.slice(0, 40))}</span>` : ''}</b>
+        <span>job</span><b><select class="deptSel" title="${escapeHtml(a.deptReason || '')}">${DEPT_ORDER.map((k) => `<option value="${k}"${k === (a.dept || 'engineering') ? ' selected' : ''}>${escapeHtml(DEPTS[k].name)}</option>`).join('')}</select>${a.deptReason ? ` <span style="color:var(--dim)">· ${escapeHtml(a.deptReason.slice(0, 40))}</span>` : ''}</b>
         <span>folder</span><b>${escapeHtml(a.directoryName || '—')}</b>
         <span>session</span><b>#${a.id}${a.hasTerminal ? ' · terminal' : a.isExternal ? ' · desktop app' : ''}${a.teamName ? ' · team ' + escapeHtml(a.teamName) : ''}</b>
         <span>context</span><b>${a.maxContextTokens ? `${Math.round(a.contextTokens / 1000)}k / ${Math.round(a.maxContextTokens / 1000)}k` : '—'}</b>
@@ -1040,7 +1073,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 // ============================================================ data feed
 const avatars = new Map(); let lastAgents = []; let connected = false; let lastPlay = null;
 function applyState(s) {
-  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null;
+  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null; lastIssues = s.issues || []; beadsOn = !!s.beads; drawTaskBoard();
   dot.classList.toggle('on', connected);
   meta.textContent = connected ? `${s.agents.length} agent${s.agents.length === 1 ? '' : 's'} · pixel-agents :${s.upstream.port}` : (s.upstream.port ? `reconnecting to :${s.upstream.port}…` : 'no pixel-agents server found');
   const seen = new Set();
@@ -1059,7 +1092,7 @@ function applyState(s) {
   renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
 }
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
-window.__officeDebug = () => ({ reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
+window.__officeDebug = () => ({ issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
   const av = avatars.get(f.id); const name = av ? av.name() : `agent ${f.id}`;
   if (f.kind === 'toolStart') { toolStats.push({ t: Date.now(), kind: toolKind(f.toolName) }); pushFeed('tool', name, (f.status || prettyTool(f.toolName)).replace(/mcp__\S+/g, (m) => prettyTool(m))); }
@@ -1069,6 +1102,7 @@ function applyFx(f) {
   else if (f.kind === 'agentClosed') pushFeed('agentClosed', name, 'left');
   else if (f.kind === 'subagentStart') pushFeed('subagentStart', name, 'spawned a sub-agent');
   if (f.kind !== 'toolDone') drawBoard(lastAgents);
+  if (f.kind === 'issues') { pushFeed('manager', 'task board', `${f.count} open task${f.count === 1 ? '' : 's'}`); drawBoard(lastAgents); return; }
   if (f.kind === 'dept') { if (av) { av.decide(); pushFeed('dept', name, `→ ${deptOf(f.dept).name}`); } return; }
   if (f.kind === 'report') { if (f.report) { if (av) av.file(f.report); else handInReport(f.report, null, false); } return; }
   if (f.kind === 'managerSay') {
@@ -1076,7 +1110,7 @@ function applyFx(f) {
     manager.task = { targetId: f.id, pendingTarget: null, text: f.action === 'move' ? f.message : f.text, phase: 'walk', until: 0, pending: !!f.pending };
     if (f.action === 'answer') { manager.task = null; manager.say(f.message.split('\n')[0], { ms: 8000 }); manager.jumpV = 1.6; }
     else if (f.id !== null && f.id !== undefined && avatars.has(f.id)) manager.walkTo(f.id);
-    else if (f.action === 'launch') { manager.say('Bringing someone in…', { ms: 20000 }); }
+    else if (f.action === 'launch' || f.action === 'handoff') { manager.say(f.message.split('\n')[0], { ms: 20000 }); }
     else if (f.action === 'play' && f.ok) manager.walkToTable();
     else { manager.task = null; manager.say(f.message, { color: '#fff', bg: 'rgba(255,77,109,0.95)', ms: 9000 }); }
     if (f.action !== 'answer') toast(f.message.split('\n')[0]);

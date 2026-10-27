@@ -4,6 +4,7 @@
 // No npm dependencies. Node 22+ (global WebSocket).
 
 import http from 'node:http';
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -50,10 +51,10 @@ function ensure(id) {
       palette: null, hueShift: 0, status: 'idle', awaitingInput: false, permission: false, hasTerminal: false,
       tools: {}, subagents: {}, contextTokens: 0, maxContextTokens: 0, lastEvent: Date.now(), createdAt: Date.now(), log: [],
       jsonlFile: null, ask: null,
-      dept: 'engineering', deptReason: '', deptManual: false, prompt: '',
+      dept: 'engineering', deptReason: '', deptManual: false, prompt: '', role: null,
       humanName: pickHumanName(), nickname: null,
     };
-    agents.set(id, a);
+    agents.set(id, a); applyRole(a);
   }
   return a;
 }
@@ -61,24 +62,35 @@ function ensure(id) {
 // Names are remembered per transcript file, so a session keeps its name across bridge restarts.
 const HUMAN_NAMES = ['Maya', 'Noah', 'Lior', 'Ava', 'Eli', 'Zoe', 'Omar', 'Nina', 'Theo', 'Ruby', 'Ari', 'Lena', 'Milo', 'Iris', 'Ezra', 'Tess',
   'Jonah', 'Clara', 'Felix', 'Hana', 'Leo', 'Mira', 'Sam', 'Ivy', 'Oscar', 'Dana', 'Hugo', 'Yael', 'Max', 'Nora', 'Ben', 'Lila', 'Adam', 'Rosa', 'Kai', 'Talia'];
+// Every name comes with a job. Ezra is always Security, Felix always UI / UX: the floor is a team of
+// specialists, and the manager routes work to whoever has the right job. "make <name> qa" overrides it.
+const NAME_ROLES = {};
+for (const n of ['Ezra', 'Omar', 'Yael', 'Max', 'Hugo', 'Kai', 'Dana']) NAME_ROLES[n] = 'security';
+for (const n of ['Felix', 'Iris', 'Lila', 'Rosa', 'Clara', 'Mira', 'Zoe']) NAME_ROLES[n] = 'uiux';
+for (const n of ['Nora', 'Nina', 'Tess', 'Theo', 'Ruby', 'Leo', 'Ivy', 'Talia']) NAME_ROLES[n] = 'qa';
+for (const n of HUMAN_NAMES) NAME_ROLES[n] ??= 'engineering';
+function roleOf(a) { return a.role || NAME_ROLES[String(a.humanName || '').split(' ')[0]] || 'engineering'; }
+function applyRole(a) { const d = roleOf(a); if (a.dept !== d) { a.dept = d; a.deptReason = a.role ? 'assigned by you' : `${a.humanName}'s job`; markDirty(); } }
 const NAMES_FILE = path.join(__dirname, 'names.json');
-let savedNames = {}; // jsonlFile -> { humanName, nickname }
+let savedNames = {}; // jsonlFile -> { humanName, nickname, role }
 try { savedNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')) || {}; } catch { /* none yet */ }
-function pickHumanName() {
+function pickHumanName(role = null) {
   const taken = new Set([...agents.values()].flatMap((a) => [a.humanName, a.nickname]));
-  const free = HUMAN_NAMES.filter((n) => !taken.has(n));
-  const pool = free.length ? free : HUMAN_NAMES;
+  const names = role ? HUMAN_NAMES.filter((n) => NAME_ROLES[n] === role) : HUMAN_NAMES;
+  const free = names.filter((n) => !taken.has(n));
+  const pool = free.length ? free : names;
   const n = pool[Math.floor(Math.random() * pool.length)];
   return free.length ? n : `${n} ${taken.size}`;
 }
 function saveName(a) {
   if (!a.jsonlFile) return;
-  savedNames[a.jsonlFile] = { humanName: a.humanName, nickname: a.nickname };
+  savedNames[a.jsonlFile] = { humanName: a.humanName, nickname: a.nickname, role: a.role || null };
   fs.writeFile(NAMES_FILE, JSON.stringify(savedNames, null, 1) + '\n', () => {});
 }
 function adoptSavedName(a) {
   const s = savedNames[a.jsonlFile];
-  if (s) { a.humanName = s.humanName || a.humanName; a.nickname = s.nickname || null; } else saveName(a);
+  if (s) { a.humanName = s.humanName || a.humanName; a.nickname = s.nickname || null; a.role = s.role || null; } else saveName(a);
+  applyRole(a);
 }
 function cleanName(s) { return String(s || '').replace(/[\x00-\x1f\x7f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 24); }
 function renameAgent(a, name) {
@@ -93,7 +105,7 @@ function logEvent(a, kind, text) {
 const sseClients = new Set();
 let dirty = false;
 function broadcast(obj) { const line = `data: ${JSON.stringify(obj)}\n\n`; for (const res of sseClients) res.write(line); }
-function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta() }; }
+function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta(), issues, beads: beadsOk }; }
 function markDirty() { dirty = true; }
 setInterval(() => { if (dirty) { dirty = false; broadcast(snapshot()); } }, 50);
 function fx(kind, id, extra = {}) { broadcast({ type: 'fx', kind, id, ...extra }); }
@@ -183,12 +195,8 @@ function setDept(a, dept, reason = '') {
   logEvent(a, 'dept', `moved to ${DEPT_NAMES[dept]}${reason ? ` (${reason})` : ''}`); markDirty(); fx('dept', a.id, { dept, reason: a.deptReason });
   return true;
 }
-function classifyTool(a, toolName = '', status = '') {
-  if (a.deptManual) return;
-  const signal = `${toolName}: ${status}`;
-  const hit = classifyText(signal);
-  if (hit) return setDept(a, hit, status || toolName);
-  if (/^(Write|Edit|MultiEdit|NotebookEdit)$/i.test(toolName)) setDept(a, 'engineering', status || toolName);
+function assignRole(a, dept, reason = 'assigned by you') { // a lasting job change, remembered with the name
+  a.role = dept; const changed = setDept(a, dept, reason); saveName(a); return changed;
 }
 // The transcript of the current turn: the prompt that started it, the assistant's text, and the
 // desktop app's wrap-up recap when there is one.
@@ -221,14 +229,8 @@ function turnInfo(a) {
   }
   return { prompt, texts, recap };
 }
-function classifyTurnStart(a) {
-  a.deptManual = false;
-  setTimeout(() => {
-    const info = turnInfo(a); if (!info) return;
-    if (info.prompt && info.prompt !== a.prompt) { a.prompt = info.prompt; markDirty(); }
-    const hit = classifyText(info.prompt);
-    if (hit) setDept(a, hit, 'the task asked for it');
-  }, 400);
+function classifyTurnStart(a) { // remember what the turn is about (shown on the agent's screen)
+  setTimeout(() => { const info = turnInfo(a); if (info && info.prompt && info.prompt !== a.prompt) { a.prompt = info.prompt; markDirty(); } }, 400);
 }
 
 // ---------- reports: what an agent hands in when its turn ends ----------
@@ -236,7 +238,52 @@ const REPORTS_FILE = path.join(__dirname, 'reports.jsonl');
 const reports = []; let reportSeq = 0;
 try { for (const line of fs.readFileSync(REPORTS_FILE, 'utf8').split('\n')) { if (!line.trim()) continue; try { const r = JSON.parse(line); reports.push(r); reportSeq = Math.max(reportSeq, r.id || 0); } catch { /* skip */ } } } catch { /* none yet */ }
 if (reports.length > 300) reports.splice(0, reports.length - 300);
-const pendingReplies = new Map(); // agentId -> { text, t } : the manager relayed your words there and you want the answer
+const pendingReplies = new Map(); // agentId -> { text, t, issueId } : the manager relayed your words there and you want the answer
+
+// ---------- beads: the floor manager files an issue for every task he hands out ----------
+// Issues live in this folder's .beads database (the `bd` CLI). The manager creates one when he types
+// a task into an agent, and closes it with the agent's report as the note when the report comes back.
+const BD = process.env.BD_BIN || 'bd';
+const beadsOk = fs.existsSync(path.join(__dirname, '.beads'));
+function bd(args, { timeoutMs = 20000, actor = 'floor-manager' } = {}) {
+  return new Promise((resolve, reject) => execFile(BD, args, { cwd: __dirname, timeout: timeoutMs, maxBuffer: 4e6, env: { ...process.env, BEADS_ACTOR: actor } },
+    (err, stdout, stderr) => err ? reject(new Error(String(stderr || err.message).trim().slice(0, 300))) : resolve(String(stdout))));
+}
+let issues = []; let issuesAt = 0; let issuesRefreshing = null;
+function refreshIssues() {
+  if (!beadsOk) return Promise.resolve([]);
+  if (issuesRefreshing) return issuesRefreshing;
+  issuesRefreshing = bd(['list', '--status', 'open,in_progress,blocked', '--json', '--brief', '--sort', 'priority']).then((out) => {
+    let list = []; try { list = JSON.parse(out) || []; } catch { list = []; }
+    const next = list.map((i) => ({ id: i.id, title: i.title, status: i.status, priority: i.priority ?? 2, type: i.issue_type || 'task', assignee: i.assignee || '', updated: i.updated_at || '' }));
+    const changed = JSON.stringify(next) !== JSON.stringify(issues);
+    issues = next; issuesAt = Date.now();
+    if (changed) { markDirty(); fx('issues', null, { count: issues.length }); }
+    return issues;
+  }).catch((e) => { console.log('[beads]', e.message); return issues; }).finally(() => { issuesRefreshing = null; });
+  return issuesRefreshing;
+}
+if (beadsOk) { refreshIssues(); setInterval(refreshIssues, 20000); }
+async function fileTask({ prompt, from, agent, discoveredFrom = null }) {
+  if (!beadsOk) return null;
+  const title = prompt.replace(/\s+/g, ' ').trim().slice(0, 90);
+  const description = `Handed out by the floor manager in Agent Office.\n\nRequest: ${from}\nAgent: ${agentName(agent)}#${agent.id} (${DEPT_NAMES[agent.dept]}${agent.directoryName ? `, folder ${agent.directoryName}` : ''})`;
+  try {
+    const out = await bd(['create', '--title', title, '--description', description, '--type', 'task', '--priority', '2', '--assignee', agentName(agent), '--labels', `office,${agent.dept}`, ...(discoveredFrom ? ['--deps', `discovered-from:${discoveredFrom}`] : []), '--json']);
+    const id = JSON.parse(out).id; if (!id) return null;
+    await bd(['update', id, '--status', 'in_progress']).catch(() => {});
+    refreshIssues(); return id;
+  } catch (e) { console.log('[beads] create failed:', e.message); return null; }
+}
+async function settleTask(issueId, r) {
+  if (!beadsOk || !issueId) return;
+  try {
+    const note = `${r.asked ? 'Agent asked a question' : 'Report'} from ${r.name} (${DEPT_NAMES[r.dept]}):\n${(r.text || r.recap).slice(0, 3000)}${r.recap && r.text ? `\n\nRecap: ${r.recap}` : ''}`;
+    await bd(['note', issueId, note], { actor: r.name }); // the agent files its own note and closes its own task
+    if (!r.asked) await bd(['close', issueId, '--reason', `report filed by ${r.name}`], { actor: r.name });
+    refreshIssues();
+  } catch (e) { console.log('[beads] settle failed:', e.message); }
+}
 const chatLog = []; // the conversation with the floor manager, so it survives a reload
 function logChat(who, name, text, extra = {}) { chatLog.push({ t: Date.now(), who, name, text: String(text || '').slice(0, 4000), ...extra }); if (chatLog.length > 200) chatLog.shift(); }
 function playing(id) { return play.isActive() && (play.meta().players || []).some((p) => p.id === id); }
@@ -248,13 +295,16 @@ function captureReport(a, attempt = 0) {
     if (attempt < 3) return setTimeout(() => captureReport(a, attempt + 1), [800, 1500, 3000][attempt]);
     return; // nothing to report (no transcript yet, or a turn with no text)
   }
-  const reply = pendingReplies.get(a.id); pendingReplies.delete(a.id);
+  const reply = pendingReplies.get(a.id); pendingReplies.delete(a.id); const hops = reply ? (reply.hops || 0) : 0;
   const r = { id: ++reportSeq, agentId: a.id, name: agentName(a), dept: a.dept, t: Date.now(), prompt: info.prompt || a.prompt || '', text: text.slice(0, 6000), recap: info.recap.slice(0, 1000), asked: !!(a.awaitingInput || a.permission), replyTo: reply ? reply.text : null };
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
   logEvent(a, 'report', r.asked ? 'asked a question' : `filed a ${DEPT_NAMES[a.dept]} report`);
-  if (reply) logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id });
+  if (reply) { r.issueId = reply.issueId || null; logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r); }
   fx('report', a.id, { report: r });
+  const h = !r.asked && reply && hops < MAX_HOPS && parseHandoff(r.text);
+  if (h && h.dept !== a.dept) dispatchHandoff(a, r, h, hops + 1);
+  else if (h) logChat('manager', 'floor manager', `${r.name} asked for a ${DEPT_NAMES[h.dept]} handoff, but that's their own job: ignored.`, { ok: false });
 }
 
 const listeners = new Set(); // one-shot listeners on upstream messages (for launch waits)
@@ -304,7 +354,6 @@ function reduce(m) {
       a.status = 'active'; a.lastEvent = Date.now();
       if (m.permissionActive) a.permission = true;
       logEvent(a, 'tool', m.status || m.toolName);
-      classifyTool(a, m.toolName, m.status);
       markDirty(); fx('toolStart', m.id, { toolName: m.toolName, status: m.status });
       break;
     }
@@ -440,9 +489,9 @@ function findAgent(name) {
 function parseRequest(text) {
   const t = text.trim();
   let m;
-  if ((m = t.match(/^(?:new|start|launch|spawn|open)\s+(?:an?\s+)?(?:new\s+)?agent\s+(?:in|at|for|on)\s+(\S+)\s*[:,-]?\s*(.*)$/i))) return { kind: 'launch', dir: m[1], prompt: m[2].trim() };
+  if ((m = t.match(/^(?:new|start|launch|spawn|open|hire)\s+(?:an?\s+)?(?:new\s+)?(?:(qa|security|sec|engineering|eng|dev|ui\s*\/?\s*ux|ui|ux|design|test(?:ing)?)\s+)?(?:agent|specialist|engineer|person)\s+(?:in|at|for|on)\s+(\S+)\s*[:,-]?\s*(.*)$/i))) return { kind: 'launch', role: m[1] ? DEPT_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] : null, dir: m[2], prompt: m[3].trim() };
   if ((m = t.match(/^(?:in|at)\s+(\S+)\s*[:,-]\s*(.+)$/i)) && !findAgent(m[1])) return { kind: 'launch', dir: m[1], prompt: m[2].trim() };
-  if ((m = t.match(/^@(\S+)\s*[:,-]?\s*(.+)$/))) return { kind: 'agent', name: m[1], prompt: m[2].trim() };
+  if ((m = t.match(/^@([^\s:,-]+)\s*[:,-]?\s*(.+)$/))) return { kind: 'agent', name: m[1], prompt: m[2].trim() };
   if ((m = t.match(/^(?:tell|ask|have|get|let|make)\s+(?:the\s+)?(\S+?)(?:\s+agent)?\s+(?:to\s+)?(.+)$/i))) return { kind: 'agent', name: m[1].replace(/[:,]$/, ''), prompt: m[2].trim() };
   if ((m = t.match(/^(\S+?)\s*[:,]\s*(.+)$/))) return DEPT_ALIASES[m[1].toLowerCase()] ? { kind: 'any', prompt: t } : { kind: 'agent', name: m[1], prompt: m[2].trim() };
   // mention anywhere
@@ -529,7 +578,16 @@ function statusAnswer(text) {
   const t = text.trim().toLowerCase().replace(/[?!.\s]+$/, '');
   const list = [...agents.values()].filter((a) => !a.parentAgentId);
   let m;
-  if (/^(hi|hello|hey|yo|hallo|shalom)\b/.test(t)) return `Hi! ${list.length} on the floor. Ask me "status", "what is <agent> doing", "what did <agent> say", or give someone a task.`;
+  if (/^(tasks?|open tasks|the board|task board|what(?:'s| is) open|what(?:'s| is) on the board|todo|backlog|issues|bd ready)$/.test(t)) {
+    if (!beadsOk) return 'There is no beads database in this folder, so I have no task board.';
+    if (!issues.length) return 'The board is clear: no open tasks.';
+    return `${issues.length} open:\n` + issues.slice(0, 12).map((i) => `${i.id} P${i.priority} ${i.status === 'in_progress' ? '◐' : '○'} ${i.title}${i.assignee ? ` (${i.assignee})` : ''}`).join('\n') + (issues.length > 12 ? `\n…and ${issues.length - 12} more` : '');
+  }
+  if (/^(team|the team|who does what|roles|jobs|who(?:'s| is) (?:on )?(?:qa|security|ui ?\/? ?ux|engineering))$/.test(t)) {
+    if (!list.length) return 'Nobody is on the floor.';
+    return Object.keys(DEPT_NAMES).map((d) => `${DEPT_NAMES[d]}: ${list.filter((a) => a.dept === d).map((a) => `${agentName(a)}${a.hasTerminal ? '' : ' (desktop)'}`).join(', ') || 'nobody'}`).join('\n');
+  }
+  if (/^(hi|hello|hey|yo|hallo|shalom)\b/.test(t)) return `Hi! ${list.length} on the floor. Ask me "status", "tasks", "what is <agent> doing", "what did <agent> say", or give someone a task.`;
   if (/^(status|report|reports|overview|who('s| is) (here|around|working|busy|idle|free|waiting)|what('s| is) (everyone|everybody|going on)( doing| up to)?|how('s| is) (it going|everyone|everybody))$/.test(t)) {
     if (!list.length) return 'The floor is empty: no agents are running.';
     const by = {}; for (const a of list) (by[a.dept] ??= []).push(a);
@@ -551,9 +609,58 @@ function parseRename(text) {
   return m ? { name: m[1].replace(/^@/, ''), to: m[2].replace(/^["']|["']$/g, '') } : null;
 }
 function parseMove(text) {
-  const m = text.trim().match(/^(?:send|move|put|assign|transfer)\s+(.+?)\s+(?:to|into)\s+(?:the\s+)?(qa|security|sec|engineering|eng|dev|ui\s*\/?\s*ux|ui|ux|design|test(?:ing)?)(?:\s+(?:dept|department|team|room|office))?\s*[.!]?$/i);
+  const DEPT_WORDS = 'qa|security|sec|engineering|eng|dev|ui\\s*\\/?\\s*ux|ui|ux|design|test(?:ing)?';
+  const m = text.trim().match(new RegExp(`^(?:send|move|put|assign|transfer)\\s+(.+?)\\s+(?:to|into)\\s+(?:the\\s+)?(${DEPT_WORDS})(?:\\s+(?:dept|department|team|room|office))?\\s*[.!]?$`, 'i'))
+    || text.trim().match(new RegExp(`^(?:make|set)\\s+(.+?)\\s+(?:an?\\s+|the\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'))
+    || text.trim().match(new RegExp(`^(.+?)\\s+(?:is|should be|will be|becomes)\\s+(?:an?\\s+|the\\s+|our\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'));
   if (!m) return null;
   return { name: m[1], dept: DEPT_ALIASES[m[2].toLowerCase().replace(/\s+/g, '')] };
+}
+// ---------- specialists: who takes a task, and bringing one in when nobody with that job is free ----------
+const HANDOFF_RULE = '\n\n(Office rule: when you are done, if this needs follow-up by QA, Security or UI/UX, end your final reply with one line exactly like "HANDOFF: qa — <what they should do>", using qa, security or uiux.)';
+function pickSpecialist(dept, exceptId = null) {
+  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && a.dept === dept && !playing(a.id));
+  pool.sort((p, q) => ((p.status === 'active' || p.permission || p.awaitingInput) - (q.status === 'active' || q.permission || q.awaitingInput)) || (q.lastEvent - p.lastEvent));
+  return pool[0] || null;
+}
+function homeDirFor(a) { // the project folder a new specialist should join: the requester's, else the busiest terminal's, else the playroom
+  const dirs = [a?.directoryName, ...[...agents.values()].filter((x) => x.hasTerminal && x.directoryName && x.directoryName !== 'playroom').sort((p, q) => q.lastEvent - p.lastEvent).map((x) => x.directoryName)];
+  for (const d of dirs) { const r = d && resolveDir(d); if (r) return r; }
+  return preparePlayroom();
+}
+async function launchSpecialist(dept, dir) {
+  const id = await launchAgent(dir); const a = agents.get(id);
+  a.humanName = pickHumanName(dept); a.role = dept; applyRole(a); markDirty();
+  fx('managerTarget', id, { text: '' });
+  const ready = await waitForPrompt(id, { acceptTrust: dir === PLAYROOM });
+  await sleep(ready ? 600 : 0); return a;
+}
+// Type a task into an agent, file it on the board and remember that an answer is owed.
+const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
+async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0 } = {}) {
+  await typeInto(a.id, prompt + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
+  const issueId = await fileTask({ prompt, from, agent: a, discoveredFrom });
+  pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops });
+  return issueId;
+}
+function parseHandoff(text) {
+  const m = /HANDOFF:\s*(qa|security|uiux|ui\s*\/?\s*ux|engineering)\s*[—–:-]+\s*(.+)/i.exec(text || '');
+  return m ? { dept: DEPT_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] || 'engineering', task: m[2].trim().slice(0, 1500) } : null;
+}
+async function dispatchHandoff(from, r, h, hops = 1) {
+  if (!upstream.privileged) return;
+  let target = pickSpecialist(h.dept, from.id); const launching = !target;
+  const text = `${r.name} hands off to ${DEPT_NAMES[h.dept]}: ${h.task}`;
+  fx('managerSay', target ? target.id : null, { text, message: launching ? `${r.name} needs ${DEPT_NAMES[h.dept]}: bringing a specialist in…` : `${r.name} is handing this to ${agentName(target)} (${DEPT_NAMES[h.dept]}).`, ok: true, action: 'handoff', pending: true });
+  logChat('manager', 'floor manager', text, { ok: true, action: 'handoff' });
+  try {
+    if (!target) target = await launchSpecialist(h.dept, homeDirFor(from));
+    const prompt = `Handoff from ${r.name} (${DEPT_NAMES[from.dept]}): ${h.task}\n\nTheir report, for context:\n${(r.text || r.recap).replace(/HANDOFF:.*$/im, '').trim().slice(0, 1500)}`;
+    const issueId = await giveTask(target, prompt, text, { discoveredFrom: r.issueId, hops });
+    r.handoff = { dept: h.dept, task: h.task, to: agentName(target), toId: target.id, issueId };
+    const message = `${agentName(target)} (${DEPT_NAMES[h.dept]}) took the handoff from ${r.name}${issueId ? `, filed as ${issueId}` : ''}.`;
+    logChat('manager', 'floor manager', message, { ok: true }); fx('managerDone', target.id, { ok: true, message, text });
+  } catch (e) { const message = `Handoff failed: ${e.message}`; logChat('manager', 'floor manager', message, { ok: false }); fx('managerDone', target ? target.id : null, { ok: false, message, text }); }
 }
 async function managerHandle(text) {
   const playReq = parsePlay(text);
@@ -572,9 +679,9 @@ async function managerHandle(text) {
     const a = findAgent(move.name);
     if (!a) { result.message = `Nobody here is called "${move.name}".`; return { result, deliver: null }; }
     result.ok = true; result.action = 'move'; result.targetId = a.id;
-    if (!setDept(a, move.dept, 'you said so')) result.message = `${agentName(a)} is already in ${DEPT_NAMES[move.dept]}.`;
-    else result.message = `${agentName(a)}, you're moving to ${DEPT_NAMES[move.dept]}.`;
-    a.deptManual = true; return { result, deliver: null };
+    if (!assignRole(a, move.dept)) result.message = `${agentName(a)} is already ${DEPT_NAMES[move.dept]}.`;
+    else result.message = `${agentName(a)}, from now on you're ${DEPT_NAMES[move.dept]}.`;
+    return { result, deliver: null };
   }
   const answer = statusAnswer(text);
   if (answer) { result.ok = true; result.action = 'answer'; result.message = answer; return { result, deliver: null }; }
@@ -583,16 +690,32 @@ async function managerHandle(text) {
     const dir = resolveDir(req.dir);
     if (!dir) { result.message = `I can't find a folder called "${req.dir}". Give me a full path or a folder under Downloads, Documents or Desktop.`; return { result, deliver: null }; }
     result.action = 'launch'; result.message = `Launching a new agent in ${path.basename(dir)}…`; result.ok = true;
-    return { result, deliver: async () => { const id = await launchAgent(dir); fx('managerTarget', id, { text }); const ready = await waitForPrompt(id); if (req.prompt) { await sleep(ready ? 600 : 0); await typeInto(id, req.prompt); } return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent.` : `New agent is up in ${path.basename(dir)}.` }; } };
+    return { result, deliver: async () => {
+      const id = await launchAgent(dir); fx('managerTarget', id, { text }); const ready = await waitForPrompt(id);
+      let issueId = null;
+      const a = agents.get(id);
+      if (a && req.role) { a.humanName = pickHumanName(req.role); a.role = req.role; applyRole(a); markDirty(); }
+      if (req.prompt && a) { await sleep(ready ? 600 : 0); issueId = await giveTask(a, req.prompt, text); }
+      return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent${issueId ? ` and filed it as ${issueId}` : ''}.` : `New agent is up in ${path.basename(dir)}.` };
+    } };
   }
   let target = null;
   if (req.kind === 'agent') {
     target = findAgent(req.name);
     if (!target) { result.message = `Nobody here is called "${req.name}". Say "new agent in <folder>: <task>" and I'll bring someone in.`; return { result, deliver: null }; }
-  } else {
-    const pool = [...agents.values()].filter((a) => a.hasTerminal).sort((p, q) => (p.status === 'active') - (q.status === 'active') || q.lastEvent - p.lastEvent);
-    target = pool[0] || null;
-    if (!target) { result.message = `Nobody on the floor can take dictation yet: your desktop sessions have no terminal I can type into. Say "new agent in <folder>: <task>" and I'll launch one.`; return { result, deliver: null }; }
+  } else { // nobody named: the job the task needs decides who gets it
+    const dept = classifyText(req.prompt) || 'engineering';
+    target = pickSpecialist(dept);
+    if (!target) {
+      if (!upstream.privileged) { result.message = `No ${DEPT_NAMES[dept]} specialist on the floor, and the bridge is read-only so I can't bring one in.`; return { result, deliver: null }; }
+      const dir = homeDirFor(null);
+      result.ok = true; result.action = 'launch'; result.message = `No ${DEPT_NAMES[dept]} specialist is free. Bringing one in to ${path.basename(dir)}…`;
+      return { result, deliver: async () => {
+        const a = await launchSpecialist(dept, dir);
+        const issueId = await giveTask(a, req.prompt, text);
+        return { targetId: a.id, message: `${agentName(a)} joined as ${DEPT_NAMES[dept]} in ${path.basename(dir)} and is on it${issueId ? ` (${issueId})` : ''}.` };
+      } };
+    }
   }
   result.targetId = target.id;
   if (!target.hasTerminal) {
@@ -601,9 +724,8 @@ async function managerHandle(text) {
   }
   result.ok = true; result.action = 'type'; result.message = `On it. Telling ${agentName(target)}…`;
   return { result, deliver: async () => {
-    const hint = classifyText(req.prompt); if (hint) { setDept(target, hint, 'the task asked for it'); target.deptManual = true; }
-    await typeInto(target.id, req.prompt); pendingReplies.set(target.id, { text, t: Date.now() });
-    return { targetId: target.id, message: `Told ${agentName(target)}. I'll bring you the answer when they're done.` };
+    const issueId = await giveTask(target, req.prompt, text);
+    return { targetId: target.id, message: `Told ${agentName(target)} (${DEPT_NAMES[target.dept]})${issueId ? `, filed as ${issueId}` : ''}. I'll bring you the answer when they're done.` };
   } };
 }
 
@@ -661,7 +783,8 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { json(res, 500, { ok: false, message: e.message }); }
     return;
   }
-  if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES });
+  if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk });
+  if (url.pathname === '/api/issues') return json(res, 200, { ok: true, issues: await refreshIssues(), beads: beadsOk });
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/report$/)) && req.method === 'POST') { // file a report on the current turn right now
     const a = agents.get(Number(m[1])); if (!a) return json(res, 404, { ok: false, message: 'no such agent' });
     const info = turnInfo(a); captureReport(a); return json(res, 200, { ok: true, hasTranscript: !!info, prompt: info?.prompt || '', texts: info?.texts.length || 0, recap: !!info?.recap });
@@ -669,7 +792,7 @@ const server = http.createServer(async (req, res) => {
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/dept$/)) && req.method === 'POST') {
     const a = agents.get(Number(m[1])); const { dept } = await readBody(req);
     if (!a || !DEPT_NAMES[dept]) return json(res, 400, { ok: false, message: 'unknown agent or department' });
-    setDept(a, dept, 'you moved them'); a.deptManual = true; return json(res, 200, { ok: true });
+    assignRole(a, dept); return json(res, 200, { ok: true });
   }
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/name$/)) && req.method === 'POST') {
     const a = agents.get(Number(m[1])); const { name } = await readBody(req);

@@ -36,9 +36,15 @@ He can only type into sessions that were launched through Pixel Agents. Sessions
 
 ## Departments and the office
 
-The desk floor is split into four glass-walled bays: **Engineering**, **QA**, **UI / UX** and **Security**. The bridge watches what each agent is doing and seats it accordingly: running tests, linters or type checks moves it to QA, touching stylesheets, HTML or design work moves it to UI / UX, audits and anything about secrets or vulnerabilities moves it to Security, and editing ordinary code brings it back to Engineering. The prompt that started the turn counts too, so `QA: run the suite` lands in QA from the start. You can override it: `send <agent> to security`, or the department picker on the agent's screen.
+The desk floor is split into four glass-walled bays: **Engineering**, **QA**, **UI / UX** and **Security**. Every agent has a job that comes with its name: Ezra is always Security, Felix always UI / UX, Nora QA, and so on (the table is `NAME_ROLES` in `server.mjs`). The job is remembered with the name in `names.json`, and you can change it with `make Ezra qa`, `send Felix to engineering`, or the job picker on the agent's screen.
+
+The floor manager routes by job. A task with no agent named (`run the test suite`, `audit the token handling`, `restyle the roster`) goes to a free specialist with the matching job; if nobody with that job is on the floor, he brings one in (`No Security specialist is free. Bringing one in to monitoragents…`), launched in the folder of the busiest project, and hands over the task. `new security agent in <folder>: <task>` hires one by hand. Agents can also pass work along: a task handed out by the manager carries a note that the agent may end its reply with `HANDOFF: qa — <what to do>`, and the manager then gives that follow-up, with the report as context, to a specialist with that job. One handoff per task, never to the agent's own department, and each handoff is filed as an issue linked to the original.
 
 To the right of the lounge is the floor manager's **office** with a report tray. When an agent finishes a turn it picks up a sheet of paper, walks to the office and drops its report (the final message of the turn, plus the desktop app's recap when there is one) on the tray. You get a notice at the bottom of the screen, the `📋 reports` button counts the unread ones, and clicking the tray, the notice or the button opens the inbox, where each report shows its department, the task it answered and the full text. Reports are kept in `reports.jsonl` so they survive a restart. If an agent ends its turn with a question for you it stays at its desk, but the report is filed anyway and marked.
+
+## The task board
+
+If the folder has a Beads database (`bd init`), the floor manager files an issue for every task he hands out: the agent is the assignee, the request is the description, and the issue sits in progress until the agent's report comes back, which the agent appends as a note before closing it. If the agent ends with a question the issue stays open with the note attached. Open issues are drawn on the task board on the left wall, `tasks` in the chat lists them, and each report in the inbox names its issue. Agents launched in a Beads-enabled folder also get `bd prime` through the repo hooks, so they track their own sub-tasks there too.
 
 ## Playtime
 
