@@ -303,12 +303,12 @@ async function fileTask({ prompt, from, agent, discoveredFrom = null }) {
     refreshIssues(); return id;
   } catch (e) { console.log('[beads] create failed:', e.message); return null; }
 }
-async function settleTask(issueId, r) {
+async function settleTask(issueId, r, { close = true } = {}) {
   if (!beadsOk || !issueId) return;
   try {
     const note = `${r.asked ? 'Agent asked a question' : 'Report'} from ${r.name} (${DEPT_NAMES[r.dept]})${r.branch ? ` on branch ${r.branch}` : ''}:\n${(r.text || r.recap).slice(0, 3000)}${r.recap && r.text ? `\n\nRecap: ${r.recap}` : ''}`;
     await bd(['note', issueId, note], { actor: r.name }); // the agent files its own note and closes its own task
-    if (!r.asked) await bd(['close', issueId, '--reason', `report filed by ${r.name}`], { actor: r.name });
+    if (!r.asked && close) await bd(['close', issueId, '--reason', `report filed by ${r.name}`], { actor: r.name });
     refreshIssues();
   } catch (e) { console.log('[beads] settle failed:', e.message); }
 }
@@ -345,8 +345,17 @@ function captureReport(a, attempt = 0) {
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
   logEvent(a, 'report', r.asked ? 'asked a question' : `filed a ${DEPT_NAMES[a.dept]} report`);
-  if (reply) { r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId); if (w && w.agentId === a.id) { r.branch = w.branch; if (!r.asked) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } } logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r).then(() => { if (!r.asked) planProgress(reply.issueId, r); }); }
+  if (reply) {
+    r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId);
+    const mine = w && w.agentId === a.id;
+    const toReview = mine && !r.asked && reviewWanted(w, a);
+    if (mine) { r.branch = w.branch; if (!r.asked && !toReview) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } }
+    logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId });
+    if (toReview) settleTask(reply.issueId, r, { close: false }).then(() => startReview(a, r, w).catch((e) => { console.log('[review]', e.message); finishWithoutReview(reply.issueId, r, w, e.message); }));
+    else settleTask(reply.issueId, r).then(() => { if (!r.asked) planProgress(reply.issueId, r); });
+  }
   fx('report', a.id, { report: r });
+  if (reply && reply.review) { if (r.asked) pendingReplies.set(a.id, reply); else handleReviewReport(a, r, reply.review).catch((e) => console.log('[review]', e.message)); return; }
   if (reply && reply.plan) { if (r.asked) pendingReplies.set(a.id, reply); else handlePlanReport(a, r, reply.plan).catch((e) => console.log('[plan]', e.message)); return; }
   if (reply && reply.desk) { if (r.asked) pendingReplies.set(a.id, reply); else handleDeskReport(a, r, reply.desk).catch((e) => console.log('[desk]', e.message)); return; }
   const h = !r.asked && reply && hops < MAX_HOPS && parseHandoff(r.text);
@@ -873,7 +882,7 @@ async function dispatchIssue(issue) {
   const { dir, branch } = reused || await makeWorktree(issue.id);
   const a = reused ? reused.a : await launchSpecialist(dept, dir);
   if (reused) { fx('managerTarget', a.id, { text: '' }); }
-  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue), reused: !!reused };
+  const w = { issueId: issue.id, agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue), reused: !!reused };
   queue.workers.set(issue.id, w); markDirty();
   await bd(['update', issue.id, '--assignee', agentName(a)]).catch(() => {});
   await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}${reused ? ', already on the floor' : ''}), working in ${dir} on branch ${branch}.`]).catch(() => {});
@@ -923,12 +932,12 @@ async function queueHandle(q) {
   return { result, deliver: null };
 }
 const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
-async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0 } = {}) {
+async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0, review = null } = {}) {
   const skill = isVideo(a) ? 'lemo-opuscar:lemo-opuscar' : skillFor(a.dept, prompt);
   await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + (isVideo(a) ? VIDEO_RULE : '') + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   const issueId = await fileTask({ prompt: skill ? `/${skill} ${prompt}` : prompt, from, agent: a, discoveredFrom });
-  pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops, skill });
+  pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops, skill, review });
   return issueId;
 }
 function skillNote(a, prompt) { const k = isVideo(a) ? 'lemo-opuscar:lemo-opuscar' : skillFor(a.dept, prompt); return k ? `, running /${k}` : ''; }
@@ -950,6 +959,97 @@ async function dispatchHandoff(from, r, h, hops = 1) {
     const message = `${agentName(target)} (${DEPT_NAMES[h.dept]}) took the handoff from ${r.name}${issueId ? `, filed as ${issueId}` : ''}.`;
     logChat('manager', 'floor manager', message, { ok: true }); fx('managerDone', target.id, { ok: true, message, text });
   } catch (e) { const message = `Handoff failed: ${e.message}`; logChat('manager', 'floor manager', message, { ok: false }); fx('managerDone', target ? target.id : null, { ok: false, message, text }); }
+}
+// ---------- the review pass: an engineering queue task goes to QA (and Security when it touches sensitive code) before it closes ----------
+// The developer stays on the task (their queue slot is held) while reviewers read the branch in the developer's
+// worktree without touching it. FAIL verdicts go back to the developer as a fix round; after REVIEW_ROUNDS the
+// task is left for Daniel. OFFICE_REVIEW=off turns the pass off.
+const REVIEW_ON = process.env.OFFICE_REVIEW !== 'off';
+const REVIEW_ROUNDS = Math.max(1, Number(process.env.OFFICE_REVIEW_ROUNDS || 2));
+const SECURITY_PATHS = /(^|\/)(server[^/]*|bridge[^/]*|auth[^/]*|login[^/]*|session[^/]*|permission[^/]*|polic[^/]*|secur[^/]*|token[^/]*|\.env[^/]*|.*\.(sh|zsh|bash|command))$|(^|\/)\.claude\/settings|office-policy\.json$/i;
+const SECURITY_CODE = /\b(child_process|execFile|execSync|spawn(Sync)?|exec\(|eval\(|new Function|dangerouslySetInnerHTML|innerHTML\s*=|process\.env|X-Office-Token|hasToken|allow(ed)?Tools|permission|authoriz|crypto\.|fs\.(write|unlink|rm)|\.\.\/)/i;
+const VERDICT_RULE = '\n\n(Office rule: end your reply with exactly one line, "VERDICT: PASS" or "VERDICT: FAIL". Before it, list the findings the developer must fix as a numbered list: file and line, what is wrong, why it matters. No findings means PASS. Do not edit, commit or check out anything in the developer\'s worktree; anything you write goes in your own folder.)';
+function reviewWanted(w, a) { return REVIEW_ON && upstream.privileged && a.dept === 'engineering' && !w.plan && !(w.review && (w.review.passed || w.review.gaveUp)); }
+async function branchChange(w) { // what the developer changed on the branch, committed or not
+  const base = (await git(['rev-parse', 'HEAD'])).trim();
+  let mb = base; try { mb = await gitIn(w.dir, ['merge-base', 'HEAD', base]); } catch { /* unrelated history: compare with HEAD */ }
+  const files = new Set((await gitIn(w.dir, ['diff', '--name-only', `${mb}...HEAD`]).catch(() => '')).split('\n').filter(Boolean));
+  const dirty = (await gitIn(w.dir, ['status', '--porcelain']).catch(() => '')).split('\n').filter(Boolean);
+  for (const l of dirty) files.add(l.slice(3).trim());
+  const commits = (await gitIn(w.dir, ['log', '--oneline', `${mb}..HEAD`]).catch(() => '')).split('\n').filter(Boolean).length;
+  let diff = ''; try { diff = await gitIn(w.dir, ['diff', mb]); } catch { /* fine */ }
+  return { base: mb, files: [...files], dirty: dirty.length > 0, commits, diff };
+}
+function needsSecurity(ch) { return ch.files.some((f) => SECURITY_PATHS.test(f)) || SECURITY_CODE.test(ch.diff.split('\n').filter((l) => /^\+[^+]/.test(l)).join('\n')); }
+function reviewPrompt(stage, w, title, description, ch, round) {
+  const see = `See the change with: git -C ${w.dir} diff ${ch.base.slice(0, 12)}  (${ch.commits} commit${ch.commits === 1 ? '' : 's'} on ${w.branch}${ch.dirty ? ', plus uncommitted changes' : ''}; files: ${ch.files.slice(0, 20).join(', ') || 'none found'}).`;
+  const head = `${stage === 'qa' ? 'QA review' : 'Security pass'} of the changes on branch ${w.branch}, round ${round}: task ${w.issueId} "${title}" by ${w.name} (Engineering), in the worktree ${w.dir}.\n${see}\n\nThe task was:\n${(description || '').trim().slice(0, 1500) || '(no description)'}`;
+  const body = stage === 'qa'
+    ? `\n\nReview the changes on that branch for correctness, then verify the task actually does what it says: read the diff, run whatever can be run against that worktree without modifying it (syntax checks, tests, a throwaway server on a spare port), and try the behaviour the task describes. Report what you ran and what you saw.`
+    : `\n\nReview the changes on that branch for security problems: command or shell injection, path traversal, auth or permission bypass, token handling, unsafe file writes, anything a prompt-injected agent could abuse. Judge only the diff, not the rest of the codebase.`;
+  return head + body + VERDICT_RULE;
+}
+async function startReview(dev, r, w) {
+  const issue = issues.find((i) => i.id === w.issueId) || {}; const title = issue.title || w.issueId;
+  const ch = await branchChange(w);
+  if (!ch.files.length) { finishWithoutReview(w.issueId, r, w, 'no changes on the branch to review'); return; }
+  const stages = ['qa', ...(needsSecurity(ch) ? ['security'] : [])];
+  const round = (w.review?.round || 0) + 1;
+  w.review = { round, stages, results: {}, startedAt: Date.now(), devReport: r }; markDirty();
+  const message = `Review round ${round} for ${w.issueId}: ${w.name}'s branch goes to QA${stages.includes('security') ? ' and Security' : ''} before it closes.`;
+  logChat('manager', 'floor manager', message, { ok: true, action: 'handoff' }); fx('managerSay', dev.id, { text: `${w.issueId}: review`, message, ok: true, action: 'handoff', pending: true });
+  await bd(['note', w.issueId, message]).catch(() => {});
+  for (const stage of stages) {
+    let target = pickSpecialist(stage, dev.id);
+    if (!target) target = await launchSpecialist(stage, homeDirFor(dev));
+    const prompt = reviewPrompt(stage, w, title, issue.description, ch, round);
+    await giveTask(target, prompt, `review of ${w.issueId} (${stage})`, { discoveredFrom: w.issueId, hops: MAX_HOPS, review: { issueId: w.issueId, stage, round } });
+    w.review.results[stage] = { agentId: target.id, name: agentName(target), verdict: null };
+    logChat('manager', 'floor manager', `${agentName(target)} (${DEPT_NAMES[stage]}) is reviewing ${w.issueId}.`, { ok: true }); fx('managerDone', target.id, { ok: true, message: `${agentName(target)} is reviewing ${w.issueId}`, text: `${w.issueId}: review` });
+  }
+  refreshIssues();
+}
+function finishWithoutReview(issueId, r, w, why) { // the pass could not run: close as before and say so
+  const message = `No review for ${issueId} (${why}); closing on ${r.name}'s report.`;
+  logChat('manager', 'floor manager', message, { ok: false }); console.log('[review]', message);
+  if (w) { w.done = true; w.review = { ...(w.review || {}), gaveUp: true }; markDirty(); setTimeout(dispatchQueue, 2000); }
+  bd(['close', issueId, '--reason', `report filed by ${r.name}; ${why}`], { actor: r.name }).catch(() => {}).then(() => { refreshIssues(); planProgress(issueId, r); });
+}
+async function handleReviewReport(a, r, rv) {
+  const w = queue.workers.get(rv.issueId); if (!w || !w.review || w.review.round !== rv.round) return;
+  const res = w.review.results[rv.stage]; if (!res || res.agentId !== a.id) return;
+  const m = /VERDICT:\s*(PASS|FAIL)/i.exec(r.text || ''); res.verdict = m ? m[1].toUpperCase() : 'FAIL';
+  res.text = (r.text || r.recap).replace(/VERDICT:.*$/im, '').trim().slice(0, 3000); res.noVerdict = !m;
+  await bd(['note', w.issueId, `${DEPT_NAMES[rv.stage]} review round ${rv.round} by ${r.name}: ${res.verdict}${res.noVerdict ? ' (no verdict line)' : ''}\n${res.text}`], { actor: r.name }).catch(() => {});
+  logChat('manager', 'floor manager', `${r.name} (${DEPT_NAMES[rv.stage]}): ${res.verdict} on ${w.issueId}${res.noVerdict ? ' (no verdict line, treated as FAIL)' : ''}.`, { ok: res.verdict === 'PASS' });
+  if (w.review.stages.some((st) => !w.review.results[st]?.verdict)) return; // the other reviewer is still at it
+  await finishReview(w);
+}
+async function finishReview(w) {
+  const rv = w.review; const dev = agents.get(w.agentId); const r = rv.devReport;
+  const failed = rv.stages.filter((st) => rv.results[st].verdict !== 'PASS');
+  if (!failed.length) {
+    rv.passed = true; w.done = true; markDirty(); setTimeout(dispatchQueue, 2000);
+    const message = `${w.issueId} passed review (${rv.stages.map((st) => `${DEPT_NAMES[st]}: ${rv.results[st].name}`).join(', ')}) in round ${rv.round}. Closed; ${w.name}'s work is on ${w.branch}.`;
+    logChat('manager', 'floor manager', message, { ok: true, action: 'queue' }); fx('managerSay', w.agentId, { text: `${w.issueId}: review passed`, message, ok: true, action: 'answer', pending: false });
+    await bd(['close', w.issueId, '--reason', `passed review: ${rv.stages.map((st) => DEPT_NAMES[st]).join(' + ')}`]).catch(() => {});
+    refreshIssues(); planProgress(w.issueId, r); return;
+  }
+  const findings = failed.map((st) => `${DEPT_NAMES[st]} (${rv.results[st].name}):\n${rv.results[st].text || '(no details)'}`).join('\n\n');
+  if (rv.round < REVIEW_ROUNDS && dev && agents.has(dev.id) && dev.hasTerminal) {
+    const next = rv.round + 1;
+    const prompt = `Review round ${rv.round} of task ${w.issueId} came back with findings. Fix them in your worktree (${w.dir}) on branch ${w.branch}, commit, and reply with what you changed; the branch goes back to review. If a finding is wrong, say why in the reply instead of changing the code.\n\n${findings}`;
+    await typeInto(dev.id, prompt + SCREEN_RULE + '\n\n(Office rule: this is a fix round. Finish it yourself and do not hand it off.)');
+    pendingReplies.set(dev.id, { text: `review round ${next}: ${w.issueId}`, t: Date.now(), issueId: w.issueId, hops: 0, queued: true });
+    const message = `${w.issueId}: ${failed.map((st) => DEPT_NAMES[st]).join(' and ')} found problems. Back to ${w.name} for a fix (round ${next} of ${REVIEW_ROUNDS}).`;
+    logChat('manager', 'floor manager', message, { ok: false, action: 'handoff' }); fx('managerSay', dev.id, { text: `${w.issueId}: fix round`, message, ok: true, action: 'handoff', pending: true });
+    await bd(['note', w.issueId, message]).catch(() => {});
+    return;
+  }
+  rv.gaveUp = true; w.done = true; markDirty(); setTimeout(dispatchQueue, 2000);
+  const message = dev && agents.has(dev.id) ? `${w.issueId} still fails ${failed.map((st) => DEPT_NAMES[st]).join(' and ')} after ${rv.round} round${rv.round === 1 ? '' : 's'}. Left open on ${w.branch} for you; the findings are on the task.` : `${w.issueId} failed review and ${w.name} is gone. Left open on ${w.branch} for you; the findings are on the task.`;
+  logChat('manager', 'floor manager', message, { ok: false, action: 'answer' }); fx('managerSay', null, { text: `${w.issueId}: review`, message, ok: false, action: 'answer', pending: false });
+  await bd(['note', w.issueId, message]).catch(() => {}); refreshIssues();
 }
 // ---------- sending idle agents home ----------
 // Office-launched (pty) agents are closed for good; the manager hires fresh specialists when work comes in.
