@@ -142,8 +142,9 @@ const boardTex = new THREE.CanvasTexture(boardCanvas); boardTex.colorSpace = THR
 const boardMaterial = new THREE.MeshStandardMaterial({ map: boardTex, emissiveMap: boardTex, emissive: 0xffffff, emissiveIntensity: 0.85, roughness: 0.4 });
 const feed = []; // global activity feed {t, name, text, kind}
 const toolStats = []; // {t, kind}
-function pushFeed(kind, name, text) { feed.push({ t: Date.now(), kind, name, text }); if (feed.length > 60) feed.shift(); }
+function pushFeed(kind, name, text, project = null) { feed.push({ t: Date.now(), kind, name, text, project }); if (feed.length > 60) feed.shift(); }
 function drawBoard(agents) {
+  agents = agents.filter(inProject); const selName = effProject();
   const c = boardCanvas, ctx = c.getContext('2d'); const W = c.width, H = c.height;
   ctx.fillStyle = '#06070f'; ctx.fillRect(0, 0, W, H);
   // subtle grid
@@ -157,6 +158,7 @@ function drawBoard(agents) {
   ctx.fillStyle = '#7c5cff'; ctx.fillRect(0, 0, W, 6);
   ctx.font = `bold 26px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   ctx.fillText('AGENT OPS', 28, 22);
+  if (selName) { ctx.fillStyle = projColor(selName); ctx.font = `bold 22px ${mono}`; ctx.fillText(`· ${selName.toUpperCase()}`.slice(0, 26), 28 + ctx.measureText('AGENT OPS ').width * 1.18, 25); }
   ctx.font = `20px ${mono}`; ctx.fillStyle = '#8b92b8'; ctx.textAlign = 'right';
   ctx.fillText(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), W - 28, 24);
   ctx.textAlign = 'left';
@@ -172,7 +174,7 @@ function drawBoard(agents) {
   // column 2: activity feed
   let x2 = 440; ctx.fillStyle = '#8b92b8'; ctx.font = `bold 18px ${mono}`; ctx.fillText('LIVE FEED', x2, 74);
   ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x2, 98, 520, 2);
-  const items = feed.slice(-9).reverse();
+  const items = feed.filter((e) => !e.project || !selName || e.project === selName).slice(-9).reverse();
   items.forEach((e, i) => {
     const y = 112 + i * 31; const col = e.kind === 'permission' ? '#ff4d6d' : e.kind === 'turnEnd' ? '#7c5cff' : e.kind === 'subagentStart' ? '#c77dff' : e.kind === 'agentCreated' ? '#39d98a' : e.kind === 'manager' || e.kind === 'report' ? '#ffb020' : '#d6dcff';
     ctx.globalAlpha = 1 - i * 0.08; ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(ago(e.t).padStart(4), x2, y + 4);
@@ -189,6 +191,7 @@ function drawBoard(agents) {
     const y = 112 + i * 31; const w = av.wants(); const col = w === 'work' ? '#39d98a' : w === 'permission' ? '#ff4d6d' : w === 'question' ? '#ffb020' : '#5c6390';
     ctx.fillStyle = '#' + av.color.getHexString(); roundRect(ctx, x3, y + 4, 14, 14, 3); ctx.fill();
     ctx.fillStyle = deptHex(a.dept); ctx.fillRect(x3 - 8, y + 4, 4, 14); // department stripe
+    if (a.project) { ctx.fillStyle = projColor(a.project); ctx.fillRect(x3 - 16, y + 4, 4, 14); } // project stripe
     ctx.fillStyle = '#e8ecff'; ctx.font = `18px ${mono}`; ctx.fillText(av.name().slice(0, 15), x3 + 24, y + 2);
     const tools = Object.values(a.tools); const t = tools[tools.length - 1];
     const label = w === 'permission' ? 'needs approval' : w === 'question' ? 'asked you' : t ? prettyTool(t.toolName) : w === 'work' ? 'thinking' : 'idle';
@@ -219,20 +222,45 @@ const taskCanvas = document.createElement('canvas'); taskCanvas.width = 1100; ta
 const taskTex = new THREE.CanvasTexture(taskCanvas); taskTex.colorSpace = THREE.SRGBColorSpace;
 const taskMaterial = new THREE.MeshStandardMaterial({ map: taskTex, emissiveMap: taskTex, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.4 });
 let lastIssues = []; let beadsOn = false; let taskSig = ''; let deptSkills = {}; let lastQueue = null;
+// ---------- projects: the folders the agents work in; one tab each, like the tabs you keep in Claude ----------
+let lastProjects = []; let homeProject = null; let selProject = null;
+try { selProject = localStorage.getItem('office.project') || null; } catch { /* private window */ }
+function effProject() { return selProject && lastProjects.some((p) => p.name === selProject) ? selProject : null; } // a remembered tab whose project has left the floor counts as "All" until it is back
+function inProject(a) { const s = effProject(); return !s || a.project === s; }
+function projectOf(name) { return lastProjects.find((p) => p.name === name) || null; }
+function projColor(name) { return projectOf(name)?.color || '#5c6390'; }
+function selRoot() { const p = projectOf(effProject()); return p?.root || null; }
+let projBoard = null; // { root, name, issues, beads, at } : another project's task board, when its tab is open
+function foreignBoardProject() { const p = projectOf(effProject()); return p && p.root && homeProject && p.root !== homeProject.root ? p : null; }
+async function refreshProjBoard(force = false) {
+  const p = foreignBoardProject();
+  if (!p) { if (projBoard) { projBoard = null; drawTaskBoard(); } return; }
+  if (!force && projBoard && projBoard.root === p.root && Date.now() - projBoard.at < 15000) return;
+  try {
+    const j = await (await api(`/api/issues?project=${encodeURIComponent(p.root)}`)).json();
+    if (foreignBoardProject()?.root !== p.root) return; // the tab changed while we waited
+    projBoard = { root: p.root, name: p.name, issues: j.issues || [], beads: !!j.beads, at: Date.now() }; drawTaskBoard();
+  } catch { /* bridge offline */ }
+}
+setInterval(() => refreshProjBoard(), 5000);
+function boardIssues() { return projBoard ? projBoard.issues : lastIssues; }
+function boardBeads() { return projBoard ? projBoard.beads : beadsOn; }
 const PRIO_COLORS = ['#ff4d6d', '#ffb020', '#4ea1ff', '#8b92b8', '#5c6390'];
 function floorAgents() { try { return lastAgents; } catch { return []; } } // the board is first drawn before the agent list exists
 function drawTaskBoard(force = false) {
-  const floor = floorAgents(); const sig = JSON.stringify([beadsOn, lastIssues, lastQueue, floor.map((a) => a.humanName || a.nickname || a.directoryName)]); if (!force && sig === taskSig) return; taskSig = sig;
+  const floor = floorAgents(); const foreign = projBoard; const issues = boardIssues(), beads = boardBeads();
+  const sig = JSON.stringify([beads, issues, foreign ? [foreign.root, foreign.at] : lastQueue, floor.map((a) => a.humanName || a.nickname || a.directoryName)]); if (!force && sig === taskSig) return; taskSig = sig;
   const c = taskCanvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
   ctx.fillStyle = '#0b0a14'; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#ffb020'; ctx.fillRect(0, 0, W, 6);
+  ctx.fillStyle = foreign ? projColor(foreign.name) : '#ffb020'; ctx.fillRect(0, 0, W, 6);
   ctx.font = `bold 26px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.fillText('TASK BOARD', 28, 22);
+  if (foreign) { ctx.fillStyle = projColor(foreign.name); ctx.font = `bold 22px ${mono}`; ctx.fillText(`· ${foreign.name.toUpperCase()}`.slice(0, 30), 200, 25); }
   ctx.font = `18px ${mono}`; ctx.fillStyle = '#8b92b8'; ctx.textAlign = 'right';
   const q = lastQueue; const qText = q ? (q.on ? `queue on · ${q.running}/${q.limit} running` : 'queue paused') : '';
-  ctx.fillText(beadsOn ? `${lastIssues.length} open · ${qText}` : 'no beads database here', W - 28, 26); ctx.textAlign = 'left';
+  ctx.fillText(beads ? `${issues.length} open${foreign ? '' : ` · ${qText}`}` : foreign ? 'no beads here' : 'no beads database here', W - 28, 26); ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(28, 62, W - 56, 2);
-  if (!lastIssues.length) { ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(beadsOn ? 'board is clear' : 'run `bd init` in the project folder', 28, 84); }
-  lastIssues.slice(0, 12).forEach((i, k) => {
+  if (!issues.length) { ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(beads ? 'board is clear' : foreign ? `no beads here: run \`bd init\` in ${foreign.name}` : 'run `bd init` in the project folder', 28, 84); }
+  issues.slice(0, 12).forEach((i, k) => {
     const y = 80 + k * 39; const col = PRIO_COLORS[Math.min(4, i.priority)] || '#8b92b8';
     ctx.fillStyle = col; roundRect(ctx, 28, y + 6, 42, 24, 6); ctx.fill();
     ctx.fillStyle = '#0b0d17'; ctx.font = `bold 16px ${mono}`; ctx.fillText(`P${i.priority}`, 36, y + 10);
@@ -243,11 +271,11 @@ function drawTaskBoard(force = false) {
     const tag = blocked ? `⛔ after ${i.blockedBy.map((b) => b.slice(-5)).join(',')} · ` : epic ? 'epic · ' : '';
     ctx.fillStyle = blocked || epic ? '#8b92b8' : '#e8ecff'; ctx.font = `19px ${mono}`;
     const title = tag + i.title; ctx.fillText(title.slice(0, 60) + (title.length > 60 ? '…' : ''), 215, y + 9);
-    const qw = lastQueue?.workers?.find((w) => w.issueId === i.id && !w.done);
+    const qw = !foreign && lastQueue?.workers?.find((w) => w.issueId === i.id && !w.done);
     const gone = i.assignee && i.assignee !== 'floor-manager' && !floor.some((a) => [a.humanName, a.nickname, a.teammateName, a.directoryName].some((n) => n && n.toLowerCase() === i.assignee.toLowerCase()));
     if (i.assignee) { ctx.fillStyle = qw ? '#39d98a' : gone ? '#ff4d6d' : '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText((qw ? '🌿 ' : gone ? '✗ ' : '') + i.assignee.slice(0, 14) + (gone ? ' (gone)' : ''), W - 28, y + 12); ctx.textAlign = 'left'; }
   });
-  if (lastIssues.length > 12) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${lastIssues.length - 12} more`, 28, 80 + 12 * 39); }
+  if (issues.length > 12) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${issues.length - 12} more`, 28, 80 + 12 * 39); }
   taskTex.needsUpdate = true;
 }
 drawTaskBoard(true);
@@ -420,32 +448,32 @@ function applyLego(m) {
   else if (m.type === 'legoAdd') {
     const now = Date.now(); m.bricks.forEach((b, i) => { b.addedAt = now + i * 60; legoBricks.set(b.id, b); });
     const av = avatars.get(m.by); if (av) av.lastBuild = now;
-    pushFeed('lego', av ? av.name() : `agent ${m.by}`, `placed ${m.bricks.length} brick${m.bricks.length === 1 ? '' : 's'}`);
+    pushFeed('lego', av ? av.name() : `agent ${m.by}`, `placed ${m.bricks.length} brick${m.bricks.length === 1 ? '' : 's'}`, av?.data.project || null);
   } else if (m.type === 'legoRemove') for (const id of m.ids) legoBricks.delete(id);
   rebuildLegoOcc(); legoDirty = true;
 }
 
 // ============================================================ text sprites + screens
-function textSprite(text, { size = 48, color = '#fff', bg = 'rgba(0,0,0,0.55)', font = 'bold' } = {}) {
-  const c = document.createElement('canvas'); c.width = 1024; c.height = 160;
-  const ctx = c.getContext('2d');
+// a plate: rounded box with the text, and with `tab` a colour block down its left edge (the project colour)
+function drawPlate(c, text, { size = 48, color = '#fff', bg = 'rgba(0,0,0,0.55)', font = 'bold', tab = null } = {}) {
+  const ctx = c.getContext('2d'); ctx.clearRect(0, 0, c.width, c.height);
   ctx.font = `${font} ${size}px ui-monospace, Menlo, monospace`;
-  const w = Math.min(1000, ctx.measureText(text).width + 60);
-  ctx.fillStyle = bg; roundRect(ctx, 512 - w / 2, 20, w, 120, 30); ctx.fill();
-  ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 512, 82, 960);
+  const pad = tab ? 36 : 0; const w = Math.min(1000, ctx.measureText(text).width + 60 + pad); const x0 = 512 - w / 2;
+  ctx.fillStyle = bg; roundRect(ctx, x0, 20, w, 120, 30); ctx.fill();
+  if (tab) { ctx.save(); roundRect(ctx, x0, 20, w, 120, 30); ctx.clip(); ctx.fillStyle = tab; ctx.fillRect(x0, 20, 28, 120); ctx.restore(); }
+  ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 512 + pad / 2, 82, 960 - pad);
+}
+function textSprite(text, opts = {}) {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 160;
+  drawPlate(c, text, opts);
   const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true, depthWrite: false })); // depth-tested so labels don't show through floors
   sp.scale.set(3.2, 0.5, 1); sp.renderOrder = 10; sp.userData.canvas = c; return sp;
 }
 function updateSprite(sp, text, opts = {}) {
-  if (sp.userData.text === text) return; sp.userData.text = text;
-  const { size = 48, color = '#fff', bg = 'rgba(0,0,0,0.55)', font = 'bold' } = opts;
-  const c = sp.userData.canvas, ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, c.width, c.height);
-  ctx.font = `${font} ${size}px ui-monospace, Menlo, monospace`;
-  const w = Math.min(1000, ctx.measureText(text).width + 60);
-  ctx.fillStyle = bg; roundRect(ctx, 512 - w / 2, 20, w, 120, 30); ctx.fill();
-  ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 512, 82, 960);
+  const key = text + '\u0000' + (opts.tab || '') + (opts.color || '');
+  if (sp.userData.text === key) return; sp.userData.text = key;
+  drawPlate(sp.userData.canvas, text, opts);
   sp.material.map.needsUpdate = true;
 }
 function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
@@ -553,21 +581,23 @@ function askText(a) {
 }
 function drawYourScreen(force = false) {
   if (!yourScreen) return;
-  const waiting = lastAgents.map((a) => ({ a, av: avatars.get(a.id) })).filter((r) => r.av && (r.av.wants() === 'permission' || r.av.wants() === 'question'))
+  const mine = lastAgents.filter(inProject); const selName = effProject();
+  const waiting = mine.map((a) => ({ a, av: avatars.get(a.id) })).filter((r) => r.av && (r.av.wants() === 'permission' || r.av.wants() === 'question'))
     .sort((p, q) => (q.a.permission - p.a.permission) || (p.a.lastEvent - q.a.lastEvent));
-  const working = lastAgents.filter((a) => avatars.get(a.id)?.wants() === 'work').length;
+  const working = mine.filter((a) => avatars.get(a.id)?.wants() === 'work').length;
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
   const reportsToday = [...reportsById.values()].filter((r) => r.t >= dayStart.getTime()).length;
   const q = lastQueue;
-  const sig = JSON.stringify([waiting.map((r) => [r.a.id, askText(r.a).slice(0, 60), Math.floor((Date.now() - r.a.lastEvent) / 30000)]), working, reportsToday, lastIssues.length, q && [q.on, q.running, q.limit], lastAgents.length]);
+  const sig = JSON.stringify([waiting.map((r) => [r.a.id, askText(r.a).slice(0, 60), Math.floor((Date.now() - r.a.lastEvent) / 30000)]), working, reportsToday, boardIssues().length, q && [q.on, q.running, q.limit], mine.length, selName]);
   if (!force && sig === yourScreen.sig) return; yourScreen.sig = sig;
   const c = yourScreen.canvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
   ctx.fillStyle = '#07080f'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = waiting.length ? '#ff4d6d' : '#39d98a'; ctx.fillRect(0, 0, W, 6);
   ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   ctx.font = `bold 30px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.fillText('INBOX', 24, 22);
+  let hx = 136; if (selName) { ctx.fillStyle = projColor(selName); ctx.font = `bold 20px ${mono}`; const t = `· ${selName}`.slice(0, 18); ctx.fillText(t, hx, 30); hx += ctx.measureText(t).width + 14; }
   ctx.font = `22px ${mono}`; ctx.fillStyle = waiting.length ? '#ff4d6d' : '#8b92b8';
-  ctx.fillText(waiting.length ? `${waiting.length} waiting on you` : 'nobody is waiting on you', 136, 28);
+  ctx.fillText(waiting.length ? `${waiting.length} waiting on you` : 'nobody is waiting on you', hx, 28);
   ctx.textAlign = 'right'; ctx.fillStyle = '#5c6390'; ctx.fillText(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), W - 24, 28); ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(24, 64, W - 48, 2);
   yourScreen.rows = [];
@@ -586,11 +616,11 @@ function drawYourScreen(force = false) {
     yourScreen.rows.push({ id: a.id, y0: y, y1: y + rowH - 8 });
   });
   if (waiting.length > max) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${waiting.length - max} more in the roster`, 24, top + max * rowH); }
-  if (!waiting.length) { ctx.fillStyle = '#39d98a'; ctx.font = `bold 44px ${mono}`; ctx.fillText('✓ all clear', 24, 150); ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(`${working} working · ${lastAgents.length - working} idle or done`, 24, 206); }
+  if (!waiting.length) { ctx.fillStyle = '#39d98a'; ctx.font = `bold 44px ${mono}`; ctx.fillText('✓ all clear', 24, 150); ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(`${working} working · ${mine.length - working} idle or done`, 24, 206); }
   // the day at a glance
   const sy = H - 78; ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(0, sy, W, 78);
   ctx.fillStyle = '#ffb020'; ctx.fillRect(0, sy, W, 2);
-  const tiles = [['WORKING', working, '#39d98a'], ['REPORTS TODAY', reportsToday, '#ffb020'], ['OPEN TASKS', lastIssues.length, '#4ea1ff'], ['QUEUE', q ? (q.on ? `${q.running}/${q.limit}` : 'off') : '—', q?.on ? '#39d98a' : '#8b92b8']];
+  const tiles = [['WORKING', working, '#39d98a'], ['REPORTS TODAY', reportsToday, '#ffb020'], ['OPEN TASKS', boardIssues().length, '#4ea1ff'], ['QUEUE', q ? (q.on ? `${q.running}/${q.limit}` : 'off') : '—', q?.on ? '#39d98a' : '#8b92b8']];
   tiles.forEach(([label, n, col], i) => {
     const x = 24 + i * (W - 48) / 4;
     ctx.fillStyle = col; ctx.font = `bold 34px ${mono}`; ctx.fillText(String(n), x, sy + 12);
@@ -680,10 +710,16 @@ class Avatar {
     this.path = []; this.mode = 'wander'; this.waitUntil = 0; this.seated = false; this.yaw = Math.PI; this.t = Math.random() * 10; this.bounce = 0; this.jumpV = 0; this.jumpY = 0;
     this.drones = new Map();
     this.lastToolText = '';
+    this.ghost = false; // another project's tab is open: drawn faint, no labels
     scene.add(this.group);
     this.decide(true);
   }
   dept() { return this.data.dept || 'engineering'; }
+  setGhost(on) {
+    this.ghost = on;
+    this.body.traverse((o) => { if (o.isMesh && o.material && !o.isSprite) { o.material.transparent = on; o.material.opacity = on ? 0.2 : 1; o.material.needsUpdate = true; o.castShadow = !on; } });
+    for (const dr of this.drones.values()) { dr.label.visible = !on; dr.group.traverse((o) => { if (o.isMesh && o.material && !o.isSprite) { o.material.transparent = on; o.material.opacity = on ? 0.2 : 1; o.material.needsUpdate = true; } }); }
+  }
   // a finished turn: carry the report to the office unless the agent is busy or waiting on you
   file(report) {
     const w = this.wants();
@@ -779,7 +815,7 @@ class Avatar {
     if (needsYou && !moving && this.jumpY <= 0 && Math.random() < dt * (w === 'permission' ? 2.5 : 1.2)) this.jumpV = w === 'permission' ? 3.0 : 2.2;
     this.jumpV -= 9.8 * dt; this.jumpY = Math.max(0, this.jumpY + this.jumpV * dt); if (this.jumpY === 0 && this.jumpV < 0) this.jumpV = 0;
     // --- labels + bubble
-    updateSprite(this.nameSprite, a.role === 'planner' ? `${this.name()} · planner` : this.name(), { size: 44, color: a.role === 'planner' ? '#ffb020' : '#e8ecff', bg: 'rgba(12,14,30,0.75)' });
+    updateSprite(this.nameSprite, a.role === 'planner' ? `${this.name()} · planner` : this.name(), { size: 44, color: a.role === 'planner' ? '#ffb020' : '#e8ecff', bg: 'rgba(12,14,30,0.75)', tab: a.project ? projColor(a.project) : null });
     let status = ''; let statusColor = '#39d98a';
     if (godVoice) { status = godVoice.listening ? '…he speaks' : 'trembling'; statusColor = '#fff4d6'; }
     else if ((w === 'permission' || w === 'question') && a.desk && a.ask?.kind === 'permission') { status = `security desk: ${a.desk.name}`; statusColor = '#ffb020'; }
@@ -817,11 +853,15 @@ class Avatar {
     const key = kind + '|' + title;
     if (scr.userData.key !== key) { scr.userData.key = key; drawScreen(scr, kind, title); }
     if (kind === 'permission') scr.emissiveIntensity = 1.0 + Math.sin(this.t * 9) * 0.8;
+    // --- another project's tab is open: fade out, no labels
+    const ghost = !inProject(a); if (ghost !== this.ghost) this.setGhost(ghost);
+    if (ghost) { this.nameSprite.visible = this.statusSprite.visible = this.bubble.visible = this.speech.visible = this.barHolder.visible = false; this.ring.material.opacity = 0; }
+    else this.nameSprite.visible = true;
     // --- glyph particles when typing
-    if (typing && this.mode === 'desk' && Math.random() < dt * 9) spawnGlyph(this.desk.x + rand(-0.3, 0.3), 0.95, this.desk.z + 0.2, TOOL_COLORS[kind]);
+    if (typing && !ghost && this.mode === 'desk' && Math.random() < dt * 9) spawnGlyph(this.desk.x + rand(-0.3, 0.3), 0.95, this.desk.z + 0.2, TOOL_COLORS[kind]);
     // --- drones for subagents
     const subs = Object.entries(a.subagents);
-    for (const [k, s] of subs) if (!this.drones.has(k)) this.drones.set(k, makeDrone(s.toolName, this.color));
+    for (const [k, s] of subs) if (!this.drones.has(k)) { this.drones.set(k, makeDrone(s.toolName, this.color)); if (this.ghost) this.setGhost(true); }
     for (const [k, dr] of this.drones) if (!a.subagents[k]) { scene.remove(dr.group); this.drones.delete(k); }
     let i = 0;
     for (const [k, dr] of this.drones) {
@@ -1045,7 +1085,16 @@ window.__officeScreen = (urls) => openScreen((urls || ['/favicon.svg']).map((u) 
 // ---------- the reports inbox ----------
 const reportsPanel = $('#reports'), rList = $('#rList'), rBadge = $('#rBadge'), rCount = $('#rCount');
 const reportsById = new Map(); let unread = 0;
-function renderBadge() { rBadge.textContent = String(unread); rBadge.classList.toggle('show', unread > 0 && !reportsPanel.classList.contains('show')); rCount.textContent = `${reportsById.size}${unread ? ` · ${unread} new` : ''}`; }
+function reportVisible(project) { const s = effProject(); return !s || !project || project === s; } // reports from before projects existed show everywhere
+function applyReportFilter() {
+  let shown = 0; for (const el of rList.querySelectorAll('.rep')) { const on = reportVisible(el.dataset.project); el.style.display = on ? '' : 'none'; if (on) shown++; }
+  renderBadge(shown);
+}
+function renderBadge(shown = null) {
+  rBadge.textContent = String(unread); rBadge.classList.toggle('show', unread > 0 && !reportsPanel.classList.contains('show'));
+  const s = effProject(); const n = shown ?? (s ? [...reportsById.values()].filter((r) => reportVisible(r.project)).length : reportsById.size);
+  rCount.textContent = `${n}${s ? ` in ${s}` : ''}${unread ? ` · ${unread} new` : ''}`;
+}
 function openReports(id = null) {
   reportsPanel.classList.add('show'); $('#help').style.display = 'none';
   if (id !== null) { const el = rList.querySelector(`.rep[data-id="${id}"]`); if (el) { el.classList.add('open'); el.classList.remove('unread'); el.scrollIntoView({ block: 'nearest' }); } }
@@ -1057,9 +1106,11 @@ $('#reportsClose').onclick = closeReports;
 function addReportRow(r, fresh) {
   if (reportsById.has(r.id)) return; reportsById.set(r.id, r);
   rList.querySelector('.none')?.remove();
-  const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id;
+  const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id; el.dataset.project = r.project || '';
+  if (r.project) el.style.borderLeftColor = projColor(r.project);
+  if (r.project && !reportVisible(r.project)) el.style.display = 'none';
   const body = mdLite(r.text) || mdLite(r.recap) || '(no text in this turn)';
-  el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b><span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
+  el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b>${r.project ? `<span class="ago" style="color:${projColor(r.project)}">${escapeHtml(r.project)}</span>` : ''}<span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
     ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>${(r.screens || []).length ? `<div class="shots">${r.screens.map((sc, i) => sc.kind === 'html' ? `<div class="doc" data-i="${i}" title="${escapeHtml(sc.name)}">🖥</div>` : `<img data-i="${i}" src="${sc.url}" alt="${escapeHtml(sc.name)}" />`).join('')}</div>` : ''}${(r.questions || []).length ? `<button type="button" class="ra">📝 answer ${r.questions.length === 1 ? 'the question' : `all ${r.questions.length} questions`}</button>` : ''}`;
   el.onclick = (e) => { if (e.target.classList.contains('ra')) { e.stopPropagation(); openBriefForReport(r); return; } if (e.target.dataset.i !== undefined && e.target.closest('.shots')) { e.stopPropagation(); openScreen(r.screens, r, Number(e.target.dataset.i)); return; } el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
   rList.prepend(el); while (rList.children.length > 100) rList.lastChild.remove();
@@ -1075,7 +1126,7 @@ function handInReport(r, av, walked) {
   toast(`${r.name} dropped off a report: ${head}`, { notice: true, chip: r.dept, onclick: () => openReports(r.id) });
   if (r.replyTo) logChat({ who: 'agent', name: r.name, dept: r.dept, text: r.text || r.recap });
   else logChat({ who: 'manager', name: 'floor manager', text: `${r.name} filed a ${deptOf(r.dept).name} report${r.asked ? ' and is waiting on your answer' : ''}. Say "what did ${r.name} say" or open 📋 reports.` }, { show: false });
-  pushFeed('report', r.name, `filed a ${deptOf(r.dept).name} report`); drawBoard(lastAgents); chime();
+  pushFeed('report', r.name, `filed a ${deptOf(r.dept).name} report`, r.project || null); drawBoard(lastAgents); chime();
   if ((r.questions || []).length >= 2 && !briefPanel.classList.contains('show')) openBriefForReport(r);
 }
 // ---------- the brief: a big form when an agent asks a lot at once ----------
@@ -1184,17 +1235,18 @@ let rosterSig = '';
 function renderRoster(agents) {
   const rows = [];
   for (const a of agents) {
-    const av = avatars.get(a.id); if (!av) continue;
+    const av = avatars.get(a.id); if (!av || !inProject(a)) continue;
     const w = av.wants(); const st = w === 'work' ? 'active' : w === 'permission' ? 'permission' : w === 'question' ? 'waiting' : 'idle';
     const tools = Object.values(a.tools); const detail = tools.length ? prettyTool(tools[tools.length - 1].toolName) : st;
     rows.push({ a, av, st, detail });
   }
-  const sig = rows.map((r) => `${r.a.id}|${r.av.name()}|${r.st}|${r.detail}|${r.a.dept}|${Object.keys(r.a.subagents || {}).length}|${followId === r.a.id}`).join(';');
+  const sig = rows.map((r) => `${r.a.id}|${r.av.name()}|${r.st}|${r.detail}|${r.a.dept}|${r.a.project}|${projColor(r.a.project)}|${Object.keys(r.a.subagents || {}).length}|${followId === r.a.id}`).join(';');
   empty.classList.toggle('show', agents.length === 0);
   if (sig === rosterSig) return; rosterSig = sig;
   roster.innerHTML = '';
   for (const { a, av, st, detail } of rows) {
     const row = document.createElement('div'); row.className = 'row' + (followId === a.id ? ' sel' : '');
+    if (a.project) { row.style.borderLeftColor = projColor(a.project); row.title = `project: ${a.project}${a.directoryName && a.directoryName !== a.project ? ` (${a.directoryName})` : ''}`; }
     row.innerHTML = `<span class="sw" style="background:#${av.color.getHexString()}"></span><span class="name">${escapeHtml(av.name())}${a.subagents && Object.keys(a.subagents).length ? ` <span style="color:#c77dff">+${Object.keys(a.subagents).length}</span>` : ''}</span><span class="dp" style="color:${deptHex(a.dept)}">${escapeHtml(deptOf(a.dept).name)}</span><span class="st ${st}">${escapeHtml(detail)}</span>`;
     row.onclick = () => { followId = followId === a.id ? null : a.id; renderRoster(lastAgents); };
     roster.appendChild(row);
@@ -1268,6 +1320,7 @@ function renderDetail() {
       <div class="kv">
         <span>job</span><b><select class="deptSel" title="${escapeHtml(a.deptReason || '')}">${DEPT_ORDER.map((k) => `<option value="${k}"${k === (a.dept || 'engineering') ? ' selected' : ''}>${escapeHtml(DEPTS[k].name)}</option>`).join('')}</select>${a.deptReason ? ` <span style="color:var(--dim)">· ${escapeHtml(a.deptReason.slice(0, 40))}</span>` : ''}</b>
         ${(deptSkills[a.dept] || []).length ? `<span>skills</span><b>${(deptSkills[a.dept] || []).map((k) => `<span title="${escapeHtml(k.what)}">/${escapeHtml(k.skill)}</span>`).join(' · ')}</b>` : ''}
+        <span>project</span><b>${a.project ? `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${projColor(a.project)};margin-right:5px"></span>${escapeHtml(a.project)}` : '—'}</b>
         <span>folder</span><b>${escapeHtml(a.directoryName || '—')}</b>
         <span>session</span><b>#${a.id}${a.hasTerminal ? ' · terminal' : a.isExternal ? ' · desktop app' : ''}${a.teamName ? ' · team ' + escapeHtml(a.teamName) : ''}</b>
         <span>context</span><b>${a.maxContextTokens ? `${Math.round(a.contextTokens / 1000)}k / ${Math.round(a.maxContextTokens / 1000)}k` : '—'}</b>
@@ -1319,6 +1372,27 @@ function renderPlay() {
 }
 setInterval(renderPlay, 1000);
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+// ---------- project tabs ----------
+const projectsEl = $('#projects'); let projectsSig = '';
+function hexRgba(hex, a) { const n = parseInt(String(hex).replace('#', ''), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; }
+function selectProject(name) {
+  selProject = name; try { if (name) localStorage.setItem('office.project', name); else localStorage.removeItem('office.project'); } catch { /* private window */ }
+  renderProjects(); renderRoster(lastAgents); drawBoard(lastAgents); drawYourScreen(true); applyReportFilter(); projBoard = null; drawTaskBoard(true); refreshProjBoard(true);
+  const p = projectOf(name); toast(p ? `${p.name}: ${p.agents} agent${p.agents === 1 ? '' : 's'}${p.root ? ` · ${p.root.replace(/^\/Users\/[^/]+/, '~')}` : ''}` : 'all projects');
+}
+function renderProjects() {
+  const sel = effProject(); const total = lastAgents.filter((a) => !a.parentAgentId).length;
+  const sig = JSON.stringify([sel, total, lastProjects.map((p) => [p.name, p.color, p.agents, p.waiting])]); if (sig === projectsSig) return; projectsSig = sig;
+  projectsEl.classList.toggle('show', lastProjects.length >= 2); projectsEl.innerHTML = '';
+  const tab = (name, color, count, need, on, title) => {
+    const b = document.createElement('button'); b.className = 'ptab' + (on ? ' on' : ''); b.type = 'button'; b.title = title;
+    if (color) { b.style.setProperty('--pc', color); if (on) b.style.background = hexRgba(color, 0.22); }
+    b.innerHTML = `${color ? '<i></i>' : ''}${escapeHtml(name)} <em>${count}</em>${need ? '<b class="need" title="someone here needs you"></b>' : ''}`;
+    b.onclick = () => selectProject(name === 'All' && !color ? null : name); projectsEl.appendChild(b);
+  };
+  tab('All', null, total, false, !sel, 'every project on the floor');
+  for (const p of lastProjects) tab(p.name, p.color, p.agents, p.waiting > 0, sel === p.name, `${p.root || p.name}\n${p.working} working · ${p.waiting} waiting on you · ${p.idle} idle${p.beads ? ' · beads' : ''}`);
+}
 $('#btnOrbit').onclick = (e) => { controls.autoRotate = !controls.autoRotate; e.target.classList.toggle('on', controls.autoRotate); };
 $('#btnSound').onclick = (e) => { soundOn = !soundOn; e.target.classList.toggle('on', soundOn); if (soundOn) chime(); };
 $('#btnNight').onclick = (e) => { nightTarget = nightTarget ? 0 : 1; e.target.textContent = nightTarget ? 'night' : 'day'; e.target.classList.toggle('on', !!nightTarget); };
@@ -1358,7 +1432,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 // ============================================================ data feed
 const avatars = new Map(); let lastAgents = []; let connected = false; let lastPlay = null;
 function applyState(s) {
-  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null; lastIssues = s.issues || []; beadsOn = !!s.beads; lastQueue = s.queue || null; drawTaskBoard();
+  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null; lastIssues = s.issues || []; beadsOn = !!s.beads; lastQueue = s.queue || null; lastProjects = s.projects || []; homeProject = s.home || homeProject; drawTaskBoard();
   dot.classList.toggle('on', connected);
   meta.textContent = connected ? `${s.agents.length} agent${s.agents.length === 1 ? '' : 's'} · pixel-agents :${s.upstream.port}` : (s.upstream.port ? `reconnecting to :${s.upstream.port}…` : 'no pixel-agents server found');
   const seen = new Set();
@@ -1371,30 +1445,33 @@ function applyState(s) {
   for (const [id, av] of avatars) if (!seen.has(id)) { av.dispose(); avatars.delete(id); }
   if (!feed.length) { // seed the wall feed from the agents' recent history
     const all = [];
-    for (const a of s.agents) for (const e of a.log || []) all.push({ t: e.t, kind: e.kind === 'tool' ? 'tool' : e.kind === 'turn' ? 'turnEnd' : e.kind, name: avatars.get(a.id)?.name() || `agent ${a.id}`, text: e.text.replace(/mcp__\S+/g, (m) => prettyTool(m)) });
+    for (const a of s.agents) for (const e of a.log || []) all.push({ t: e.t, kind: e.kind === 'tool' ? 'tool' : e.kind === 'turn' ? 'turnEnd' : e.kind, name: avatars.get(a.id)?.name() || `agent ${a.id}`, text: e.text.replace(/mcp__\S+/g, (m) => prettyTool(m)), project: a.project || null });
     all.sort((p, q) => p.t - q.t); for (const e of all.slice(-40)) feed.push(e);
   }
-  renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
+  renderProjects(); renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
 }
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
+window.__officeState = (s) => { applyState({ upstream: { connected: true, port: 0 }, agents: [], ...s }); return lastAgents.length; }; // debug hook: feed a fake state snapshot
 window.__officeFake = (id, kind) => { const av = avatars.get(id); if (!av) return 'no agent'; av.data.permission = kind === 'permission'; av.data.awaitingInput = kind === 'question'; av.data.ask = kind === 'question' ? { kind: 'question', question: 'Fake: which option should I take for the fake test?' } : kind === 'permission' ? { kind: 'permission', tool: 'Bash', summary: 'rm -rf build' } : null; av.decide(); drawYourScreen(true); return 'ok'; }; // debug hook
 window.__officeRowPixel = (i) => { const r = yourScreen?.rows[i]; if (!r) return null; const c = yourScreen.canvas; const v = 1 - ((r.y0 + r.y1) / 2) / c.height; const p = new THREE.Vector3(0, (v - 0.5) * 0.7, 0); yourScreen.mesh.localToWorld(p).project(camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight]; }; // debug hook
 window.__officePick = (x, y, id) => { mouse.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera); const av = ray.intersectObjects([...avatars.values()].map((a) => a.group), true)[0]; const one = id !== undefined && avatars.get(id) ? ray.intersectObject(avatars.get(id).group, true).length : -1; const wp = id !== undefined && avatars.get(id) ? avatars.get(id).group.getWorldPosition(new THREE.Vector3()).toArray().map((v) => +v.toFixed(2)) : null; return { one, wp, origin: ray.ray.origin.toArray().map((v) => +v.toFixed(2)), dir: ray.ray.direction.toArray().map((v) => +v.toFixed(3)), near: ray.near, far: ray.far, layers: ray.layers.mask, size: [innerWidth, innerHeight, renderer.domElement.clientWidth, renderer.domElement.clientHeight], yourScreen: !!(yourScreen && ray.intersectObject(yourScreen.mesh)[0]), tray: !!(trayHit && ray.intersectObject(trayHit).length), avatar: av ? { dist: +av.distance.toFixed(2), obj: av.object.type, geom: av.object.geometry?.type } : null, bin: !!ray.intersectObjects(binParts, true)[0], board: !!ray.intersectObjects(boards.map((b) => b.mesh))[0] }; }; // debug hook
 window.__officeInternals = () => ({ THREE, camera, scene, avatars, ray, controls, renderer }); // debug hook
 window.__officeProject = (id) => { const av = avatars.get(id); if (!av) return null; const p = av.group.position.clone(); p.y += 1.2; p.project(camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight]; }; // debug hook: CSS pixel of an avatar's chest
+window.__officeProjectPick = (name) => { selectProject(name || null); return effProject(); }; // debug hook: switch tabs from the console
+window.__officeProjects = (list) => { lastProjects = list; lastAgents = lastAgents.map((a) => ({ ...a })); renderProjects(); return lastProjects; }; // debug hook: fake the projects list
 window.__officeCam = (p, t) => { endReveal(); followId = null; camera.position.set(...p); controls.target.set(...t); }; // debug hook: place the camera
-window.__officeDebug = () => ({ huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
+window.__officeDebug = () => ({ project: effProject(), projectRoot: selRoot(), projects: lastProjects.map((p) => ({ name: p.name, agents: p.agents, waiting: p.waiting, color: p.color, root: p.root })), board: projBoard ? { name: projBoard.name, issues: projBoard.issues.length, beads: projBoard.beads } : 'home', ghosts: [...avatars.values()].filter((a) => a.ghost).map((a) => a.id), huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
-  const av = avatars.get(f.id); const name = av ? av.name() : `agent ${f.id}`;
-  if (f.kind === 'toolStart') { toolStats.push({ t: Date.now(), kind: toolKind(f.toolName) }); pushFeed('tool', name, (f.status || prettyTool(f.toolName)).replace(/mcp__\S+/g, (m) => prettyTool(m))); }
-  else if (f.kind === 'turnEnd') pushFeed('turnEnd', name, f.asked ? 'asked you a question' : 'finished its turn');
-  else if (f.kind === 'permission') pushFeed('permission', name, 'needs your approval');
-  else if (f.kind === 'agentCreated') pushFeed('agentCreated', name, 'joined the office');
-  else if (f.kind === 'agentClosed') pushFeed('agentClosed', name, 'left');
-  else if (f.kind === 'subagentStart') pushFeed('subagentStart', name, 'spawned a sub-agent');
+  const av = avatars.get(f.id); const name = av ? av.name() : `agent ${f.id}`; const proj = av?.data.project || null;
+  if (f.kind === 'toolStart') { toolStats.push({ t: Date.now(), kind: toolKind(f.toolName) }); pushFeed('tool', name, (f.status || prettyTool(f.toolName)).replace(/mcp__\S+/g, (m) => prettyTool(m)), proj); }
+  else if (f.kind === 'turnEnd') pushFeed('turnEnd', name, f.asked ? 'asked you a question' : 'finished its turn', proj);
+  else if (f.kind === 'permission') pushFeed('permission', name, 'needs your approval', proj);
+  else if (f.kind === 'agentCreated') pushFeed('agentCreated', name, 'joined the office', proj);
+  else if (f.kind === 'agentClosed') pushFeed('agentClosed', name, 'left', proj);
+  else if (f.kind === 'subagentStart') pushFeed('subagentStart', name, 'spawned a sub-agent', proj);
   if (f.kind !== 'toolDone') drawBoard(lastAgents);
   if (f.kind === 'issues') { pushFeed('manager', 'task board', `${f.count} open task${f.count === 1 ? '' : 's'}`); drawBoard(lastAgents); return; }
-  if (f.kind === 'dept') { if (av) { av.decide(); pushFeed('dept', name, `→ ${deptOf(f.dept).name}`); } return; }
+  if (f.kind === 'dept') { if (av) { av.decide(); pushFeed('dept', name, `→ ${deptOf(f.dept).name}`, proj); } return; }
   if (f.kind === 'report') { if (f.report) { if (av) av.file(f.report); else handInReport(f.report, null, false); } return; }
   if (f.kind === 'managerSay') {
     logChat({ who: 'you', name: 'you', text: f.text, images: f.images || [] }); logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });
@@ -1528,7 +1605,7 @@ window.__officeGod = (text, send = false) => { voiceOfGod(text || 'Finish the bu
 
 async function askManager(text, images = []) {
   manager.say('On it!', { ms: 3000 }); manager.jumpV = 2.4;
-  try { const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, images }) }); if (!r.ok) toast('the floor manager is not answering'); }
+  try { const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, images, project: selRoot() }) }); if (!r.ok) toast('the floor manager is not answering'); }
   catch { toast('bridge offline — run `npm start`'); }
 }
 function connect() {

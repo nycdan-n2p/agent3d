@@ -117,7 +117,7 @@ function logEvent(a, kind, text) {
 const sseClients = new Set();
 let dirty = false;
 function broadcast(obj) { const line = `data: ${JSON.stringify(obj)}\n\n`; for (const res of sseClients) res.write(line); }
-function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta(), issues, beads: beadsOk, queue: queueMeta() }; }
+function snapshot() { return { type: 'state', upstream, agents: [...agents.values()].map((a) => ({ ...a, project: projectKeyOf(a) })), play: play.meta(), issues, beads: beadsOk, queue: queueMeta(), projects: projectsList(), home: { name: path.basename(PROJECT), root: PROJECT } }; }
 function markDirty() { dirty = true; try { saveQueue(); } catch { /* before the queue is set up */ } }
 setInterval(() => { if (dirty) { dirty = false; broadcast(snapshot()); } }, 50);
 function fx(kind, id, extra = {}) { broadcast({ type: 'fx', kind, id, ...extra }); }
@@ -273,19 +273,37 @@ const pendingReplies = new Map(); // agentId -> { text, t, issueId } : the manag
 // a task into an agent, and closes it with the agent's report as the note when the report comes back.
 const BD = process.env.BD_BIN || 'bd';
 const beadsOk = fs.existsSync(path.join(__dirname, '.beads'));
-function bd(args, { timeoutMs = 20000, actor = 'floor-manager' } = {}) {
-  return new Promise((resolve, reject) => execFile(BD, args, { cwd: __dirname, timeout: timeoutMs, maxBuffer: 4e6, env: { ...process.env, BEADS_ACTOR: actor } },
+function bd(args, { timeoutMs = 20000, actor = 'floor-manager', cwd = __dirname } = {}) {
+  return new Promise((resolve, reject) => execFile(BD, args, { cwd, timeout: timeoutMs, maxBuffer: 4e6, env: { ...process.env, BEADS_ACTOR: actor } },
     (err, stdout, stderr) => err ? reject(new Error(String(stderr || err.message).trim().slice(0, 300))) : resolve(String(stdout))));
 }
 let issues = []; let issuesAt = 0; let issuesRefreshing = null;
-function refreshIssues() {
-  if (!beadsOk) return Promise.resolve([]);
-  if (issuesRefreshing) return issuesRefreshing;
-  issuesRefreshing = Promise.all([bd(['list', '--status', 'open,in_progress,blocked', '--json', '--brief', '--sort', 'priority']), bd(['blocked', '--json']).catch(() => '[]')]).then(([out, blockedOut]) => {
+// The open board of the beads database in `cwd`: this repo's by default, another project's for its tab.
+function listIssues(cwd) {
+  return Promise.all([bd(['list', '--status', 'open,in_progress,blocked', '--json', '--brief', '--sort', 'priority'], { cwd }), bd(['blocked', '--json'], { cwd }).catch(() => '[]')]).then(([out, blockedOut]) => {
     let list = []; try { list = JSON.parse(out) || []; } catch { list = []; }
     let blocked = []; try { blocked = JSON.parse(blockedOut) || []; } catch { blocked = []; }
     const blockedBy = new Map(blocked.map((b) => [b.id, (b.blocked_by || b.blockers || b.dependencies || []).map((d) => typeof d === 'string' ? d : d.id || d.depends_on_id || '').filter(Boolean)]));
-    const next = list.map((i) => ({ id: i.id, title: i.title, status: i.status, priority: i.priority ?? 2, type: i.issue_type || 'task', assignee: i.assignee || '', updated: i.updated_at || '', labels: i.labels || [], blockedBy: blockedBy.get(i.id) || null }));
+    return list.map((i) => ({ id: i.id, title: i.title, status: i.status, priority: i.priority ?? 2, type: i.issue_type || 'task', assignee: i.assignee || '', updated: i.updated_at || '', labels: i.labels || [], blockedBy: blockedBy.get(i.id) || null }));
+  });
+}
+const projectIssues = new Map(); // root -> { at, issues, beads, pending } : other projects' boards, refreshed on demand
+function issuesFor(root) {
+  if (root === PROJECT || root === __dirname) return refreshIssues().then((list) => ({ issues: list, beads: beadsOk }));
+  const beads = fs.existsSync(path.join(root, '.beads'));
+  if (!beads) return Promise.resolve({ issues: [], beads: false });
+  let e = projectIssues.get(root);
+  if (e && (e.pending || Date.now() - e.at < 15000)) return e.pending || Promise.resolve({ issues: e.issues, beads: true });
+  e = { at: 0, issues: e ? e.issues : [], beads: true, pending: null }; projectIssues.set(root, e);
+  e.pending = listIssues(root).then((list) => { e.issues = list; return { issues: list, beads: true }; })
+    .catch((err) => { console.log('[beads]', path.basename(root), err.message); return { issues: e.issues, beads: true }; })
+    .finally(() => { e.at = Date.now(); e.pending = null; });
+  return e.pending;
+}
+function refreshIssues() {
+  if (!beadsOk) return Promise.resolve([]);
+  if (issuesRefreshing) return issuesRefreshing;
+  issuesRefreshing = listIssues(__dirname).then((next) => {
     const changed = JSON.stringify(next) !== JSON.stringify(issues);
     issues = next; issuesAt = Date.now();
     if (changed) { markDirty(); fx('issues', null, { count: issues.length }); }
@@ -342,7 +360,7 @@ function captureReport(a, attempt = 0) {
     return; // nothing to report (no transcript yet, or a turn with no text)
   }
   const reply = pendingReplies.get(a.id); pendingReplies.delete(a.id); const hops = reply ? (reply.hops || 0) : 0;
-  const r = { id: ++reportSeq, agentId: a.id, name: agentName(a), dept: a.dept, t: Date.now(), prompt: info.prompt || a.prompt || '', text: text.slice(0, 6000), recap: info.recap.slice(0, 1000), asked: !!(a.awaitingInput || a.permission), replyTo: reply ? reply.text : null, questions: extractQuestions(text) };
+  const r = { id: ++reportSeq, agentId: a.id, name: agentName(a), dept: a.dept, project: projectKeyOf(a), t: Date.now(), prompt: info.prompt || a.prompt || '', text: text.slice(0, 6000), recap: info.recap.slice(0, 1000), asked: !!(a.awaitingInput || a.permission), replyTo: reply ? reply.text : null, questions: extractQuestions(text) };
   r.screens = collectScreens(info, text, r.id);
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
@@ -770,15 +788,75 @@ function collectScreens(info, text, reportId) {
 const HANDOFF_RULE = '\n\n(Office rule: when you are done, if this needs follow-up by QA, Security or UI/UX, end your final reply with one line exactly like "HANDOFF: qa — <what they should do>", using qa, security or uiux.)';
 // The video producer's standing orders: one round of questions, then split the production.
 const VIDEO_RULE = '\n\n(Office rule: you are the office\'s video producer. Make the film with the lemo-opuscar skill. Everything you need from Daniel goes in ONE message: a numbered list of questions, one per line, each ending with a question mark and followed by the default you will use if he skips it; then stop and wait for his answers. Never come back with a second round. Divide the production: run sub-agents in parallel for the voice, the music, the scenes and the render checks, and hand the finished film to QA with a HANDOFF line.)';
-function pickSpecialist(job, exceptId = null) { // job: a department, or 'video' for a video producer (who only takes video work)
-  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && !isPlanner(a) && !playing(a.id) && (job === 'video' ? isVideo(a) : a.dept === job && !isVideo(a)));
+function pickSpecialist(job, exceptId = null, { root = null } = {}) { // job: a department, or 'video' for a video producer (who only takes video work); root: only people working in that project
+  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && !isPlanner(a) && !playing(a.id) && (job === 'video' ? isVideo(a) : a.dept === job && !isVideo(a)) && (!root || projectRootOfAgent(a) === root));
   pool.sort((p, q) => ((p.status === 'active' || p.permission || p.awaitingInput) - (q.status === 'active' || q.permission || q.awaitingInput)) || (q.lastEvent - p.lastEvent));
   return pool[0] || null;
 }
-function homeDirFor(a) { // the project folder a new specialist should join: the requester's, else the busiest terminal's, else the playroom
+function homeDirFor(a, root = null) { // the project folder a new specialist should join: the selected project's, else the requester's, else the busiest terminal's, else the playroom
+  if (root) return root;
   const dirs = [a?.directoryName, ...[...agents.values()].filter((x) => x.hasTerminal && x.directoryName && x.directoryName !== 'playroom').sort((p, q) => q.lastEvent - p.lastEvent).map((x) => x.directoryName)];
   for (const d of dirs) { const r = d && resolveDir(d); if (r) return r; }
   return preparePlayroom();
+}
+// ---------- projects: the folder an agent runs in, so several code projects can share one floor ----------
+// A project is a folder (directoryName is its basename). Worktrees of a project (.worktrees/<id>, .claude/worktrees/<name>)
+// and the playroom belong to the project that holds them. Each project name gets a stable colour.
+const PROJECT_COLORS = ['#2dd4bf', '#fb923c', '#f472b6', '#a3e635', '#38bdf8', '#a78bfa', '#fbbf24', '#fb7185', '#34d399', '#818cf8', '#e879f9', '#facc15'];
+function projectColor(name) { let h = 0; for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return PROJECT_COLORS[h % PROJECT_COLORS.length]; }
+const projectRoots = new Map(); // directoryName -> { root, at }
+const WORKTREE_DIRS = ['.worktrees', path.join('.claude', 'worktrees')];
+// Is `name` a worktree folder of `root`? Also by suffix: the desktop app reports "determined-shannon-7541bc" as "7541bc".
+function isWorktreeOf(root, name) {
+  for (const d of WORKTREE_DIRS) {
+    try { if (fs.statSync(path.join(root, d, name)).isDirectory()) return true; } catch { /* not there */ }
+    try { if (fs.readdirSync(path.join(root, d)).some((f) => f.endsWith(`-${name}`))) return true; } catch { /* no such dir */ }
+  }
+  return false;
+}
+function dirInSearch(name) { for (const base of SEARCH_DIRS) { const p = path.join(base, name); try { if (fs.statSync(p).isDirectory()) return p; } catch { /* next */ } } return null; }
+function rootOfCwd(cwd) { const m = /^(.*?)\/(?:\.worktrees|\.claude\/worktrees|playroom)(?:\/[^/]+)?$/.exec(cwd); return m ? m[1] : cwd; } // a worktree (or the playroom) belongs to the checkout that holds it
+function projectRootOf(dirName) {
+  if (!dirName) return null;
+  const hit = projectRoots.get(dirName);
+  if (hit && (hit.root || Date.now() - hit.at < 60000)) return hit.root;
+  let root = null;
+  if (dirName === 'playroom' || dirName === path.basename(PROJECT) || isWorktreeOf(PROJECT, dirName)) root = PROJECT;
+  else root = dirInSearch(dirName);
+  if (!root) for (const r of new Set([...projectRoots.values()].map((e) => e.root).filter(Boolean))) if (isWorktreeOf(r, dirName)) { root = r; break; }
+  if (!root) { const m = /^(.+)-[a-z0-9]+(?:\.\d+)?$/i.exec(dirName); const r = m && dirInSearch(m[1]); if (r && isWorktreeOf(r, dirName)) root = r; } // a beads id like monitoragents-15l: a worktree of monitoragents
+  projectRoots.set(dirName, { root, at: Date.now() });
+  return root;
+}
+// The transcript lives in ~/.claude/projects/<cwd with / and . turned into ->/; undo that against the disk.
+const slugCache = new Map();
+function cwdFromJsonl(file) {
+  if (!file) return null;
+  const slug = path.basename(path.dirname(file)); if (slugCache.has(slug)) return slugCache.get(slug);
+  const parts = slug.split('-').slice(1); let found = null;
+  const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+  const partial = (p) => { try { const b = path.basename(p); return fs.readdirSync(path.dirname(p)).some((f) => f !== b && f.startsWith(b)); } catch { return false; } }; // "determined" on the way to "determined-shannon-7541bc"
+  const walk = (cur, i) => {
+    if (found) return;
+    if (i === parts.length) { if (isDir(cur)) found = cur; return; }
+    for (const sep of i === 0 ? ['/'] : ['/', '-', '.']) { const next = (i === 0 ? '' : cur) + sep + parts[i]; if (isDir(next) || partial(next)) walk(next, i + 1); }
+  };
+  try { walk('', 0); } catch { /* give up */ }
+  slugCache.set(slug, found); return found;
+}
+function projectRootOfAgent(a) { const cwd = cwdFromJsonl(a.jsonlFile); return (cwd && rootOfCwd(cwd)) || projectRootOf(a.directoryName); }
+function projectKeyOf(a) { const root = projectRootOfAgent(a); return root ? path.basename(root) : (a.directoryName || null); }
+function knownRoot(root) { return typeof root === 'string' && (root === PROJECT || [...agents.values()].some((a) => projectRootOfAgent(a) === root)); }
+function projectsList() {
+  const by = new Map();
+  for (const a of agents.values()) {
+    const name = projectKeyOf(a); if (!name) continue;
+    let p = by.get(name); if (!p) { const root = projectRootOfAgent(a); p = { name, root, color: projectColor(name), agents: 0, working: 0, waiting: 0, idle: 0, beads: !!(root && fs.existsSync(path.join(root, '.beads'))), home: root === PROJECT }; by.set(name, p); }
+    if (a.parentAgentId) continue;
+    p.agents++;
+    if (a.permission || (a.status !== 'active' && a.awaitingInput)) p.waiting++; else if (a.status === 'active') p.working++; else p.idle++;
+  }
+  return [...by.values()].sort((p, q) => (q.home - p.home) || (q.agents - p.agents) || p.name.localeCompare(q.name));
 }
 async function launchSpecialist(dept, dir) {
   const id = await launchAgent(dir); const a = agents.get(id);
@@ -1298,7 +1376,7 @@ async function fileEpic(prompt, planner) {
     const id = JSON.parse(out).id || null; refreshIssues(); return id;
   } catch (e) { console.log('[beads] epic failed:', e.message); return null; }
 }
-function planHandle(prompt, from, explicit) {
+function planHandle(prompt, from, explicit, root = null) {
   const result = { ok: false, action: 'plan', targetId: null, message: '' };
   if (!beadsOk) { result.message = 'That needs a plan with several parts, but there is no beads database here to track them. Run `bd init` in this folder, or say "@<name>: …" to give it to one person.'; return { result, deliver: null }; }
   if (!upstream.privileged) { result.message = "That needs splitting up, but the bridge is read-only so I can't bring anyone in."; return { result, deliver: null }; }
@@ -1306,7 +1384,7 @@ function planHandle(prompt, from, explicit) {
   result.ok = true; result.targetId = planner ? planner.id : null;
   result.message = `${explicit ? 'Right' : "That's a big one"}. ${planner ? `Taking it to ${agentName(planner)} to break it down…` : 'Bringing in a planner to break it down…'}`;
   return { result, deliver: async () => {
-    if (!planner) planner = await launchSpecialist('planner', homeDirFor(null));
+    if (!planner) planner = await launchSpecialist('planner', homeDirFor(null, root));
     const epicId = await fileEpic(prompt, planner);
     await typeInto(planner.id, plannerPrompt(prompt));
     logEvent(planner, 'manager', 'splitting a big task');
@@ -1376,7 +1454,7 @@ function planProgress(issueId, r) {
   logChat('manager', 'floor manager', message, { ok: true, action: 'plan' }); fx('managerSay', null, { text: p.title, message, ok: true, action: 'answer', pending: false });
   setTimeout(dispatchQueue, 1500);
 }
-async function managerHandle(text) {
+async function managerHandle(text, { project: root = null } = {}) { // root: the project tab you have open, if any
   if (isSendHome(text.trim())) return sendHomeHandle();
   const playReq = parsePlay(text);
   if (playReq) return playHandle(playReq);
@@ -1415,17 +1493,17 @@ async function managerHandle(text) {
       return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent${issueId ? ` and filed it as ${issueId}` : ''}.` : `New agent is up in ${path.basename(dir)}.` };
     } };
   }
-  if (req.kind === 'any' && !VIDEO_RE.test(req.prompt) && (req.plan || wantsPlan(req.prompt))) return planHandle(req.prompt, text, !!req.plan); // a video brief is long by nature: the producer splits it, not a planner
+  if (req.kind === 'any' && !VIDEO_RE.test(req.prompt) && (req.plan || wantsPlan(req.prompt))) return planHandle(req.prompt, text, !!req.plan, root); // a video brief is long by nature: the producer splits it, not a planner
   let target = null;
   if (req.kind === 'agent') {
     target = findAgent(req.name);
     if (!target) { result.message = `Nobody here is called "${req.name}". Say "new agent in <folder>: <task>" and I'll bring someone in.`; return { result, deliver: null }; }
   } else { // nobody named: the job the task needs decides who gets it
     const dept = jobForText(req.prompt) || 'engineering';
-    target = pickSpecialist(dept);
+    target = pickSpecialist(dept, null, { root });
     if (!target) {
-      if (!upstream.privileged) { result.message = `No ${JOB_NAMES[dept]} specialist on the floor, and the bridge is read-only so I can't bring one in.`; return { result, deliver: null }; }
-      const dir = homeDirFor(null);
+      if (!upstream.privileged) { result.message = `No ${JOB_NAMES[dept]} specialist ${root ? `in ${path.basename(root)}` : 'on the floor'}, and the bridge is read-only so I can't bring one in.`; return { result, deliver: null }; }
+      const dir = homeDirFor(null, root);
       result.ok = true; result.action = 'launch'; result.message = dept === 'video' ? `No video producer is free. Bringing one in to ${path.basename(dir)}…` : `No ${DEPT_NAMES[dept]} specialist is free. Bringing one in to ${path.basename(dir)}…`;
       return { result, deliver: async () => {
         const a = await launchSpecialist(dept, dir);
@@ -1490,11 +1568,12 @@ const server = http.createServer(async (req, res) => {
     let text = typeof body.text === 'string' ? body.text : '';
     const images = (Array.isArray(body.images) ? body.images : []).filter((u) => typeof u === 'string' && /^\/screens\/[^/]+$/.test(u)).slice(0, 10);
     if (!text.trim() && !images.length) return json(res, 400, { ok: false, message: 'say something' });
+    const project = knownRoot(body.project) ? body.project : null; // only a folder someone on the floor is already working in
     const shown = text.slice(0, 12000);
     if (images.length) text = (shown.trim() || 'Look at the attached image.') + `\n\nAttached ${images.length === 1 ? 'image' : 'images'} (read ${images.length === 1 ? 'it' : 'them'} with the Read tool): ` + images.map((u) => path.join(SCREENS_DIR, decodeURIComponent(u.slice('/screens/'.length)))).join(' , ');
     else text = shown;
     try {
-      const { result, deliver } = await managerHandle(text);
+      const { result, deliver } = await managerHandle(text, { project });
       json(res, 200, result);
       logChat('you', 'you', shown, images.length ? { images } : {}); logChat('manager', 'floor manager', result.message, { ok: result.ok, action: result.action });
       fx('managerSay', result.targetId, { text: shown, images, message: result.message, ok: result.ok, action: result.action, pending: !!deliver });
@@ -1524,7 +1603,12 @@ const server = http.createServer(async (req, res) => {
     });
   }
   if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk, skills: Object.fromEntries(Object.entries(DEPT_SKILLS).map(([d, ks]) => [d, ks.map((k) => ({ skill: k.skill, what: k.what }))])) });
-  if (url.pathname === '/api/issues') return json(res, 200, { ok: true, issues: await refreshIssues(), beads: beadsOk });
+  if (url.pathname === '/api/issues') { // ?project=<root> reads that project's board instead of this repo's
+    const root = url.searchParams.get('project');
+    if (root && !knownRoot(root)) return json(res, 400, { ok: false, message: 'not a project on the floor' });
+    if (root) { const r = await issuesFor(root); return json(res, 200, { ok: true, root, ...r }); }
+    return json(res, 200, { ok: true, issues: await refreshIssues(), beads: beadsOk });
+  }
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/report$/)) && req.method === 'POST') { // file a report on the current turn right now
     const a = agents.get(Number(m[1])); if (!a) return json(res, 404, { ok: false, message: 'no such agent' });
     const info = turnInfo(a); captureReport(a); return json(res, 200, { ok: true, hasTranscript: !!info, prompt: info?.prompt || '', texts: info?.texts.length || 0, recap: !!info?.recap });
