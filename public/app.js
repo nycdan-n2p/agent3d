@@ -651,7 +651,7 @@ class Avatar {
     this.nameSprite = textSprite(this.name(), { size: 44, color: '#e8ecff', bg: 'rgba(12,14,30,0.75)' }); this.nameSprite.position.y = 2.2; this.nameSprite.scale.set(2.6, 0.42, 1); this.group.add(this.nameSprite);
     this.statusSprite = textSprite('', { size: 40, color: '#39d98a', bg: 'rgba(12,14,30,0.75)' }); this.statusSprite.position.y = 2.58; this.statusSprite.scale.set(3.4, 0.46, 1); this.statusSprite.visible = false; this.group.add(this.statusSprite);
     this.bubble = textSprite('!', { size: 90, color: '#fff', bg: 'rgba(255,77,109,0.95)' }); this.bubble.position.set(0.55, 2.3, 0); this.bubble.scale.set(0.8, 0.5, 1); this.bubble.visible = false; this.group.add(this.bubble);
-    this.speech = textSprite('', { size: 38, color: '#111', bg: 'rgba(255,255,255,0.95)' }); this.speech.position.y = 3.0; this.speech.scale.set(4.4, 0.6, 1); this.speech.visible = false; this.group.add(this.speech); this.speechUntil = 0; this.lastBuild = 0;
+    this.speech = textSprite('', { size: 38, color: '#f3f5ff', bg: 'rgba(12,14,30,0.88)' }); this.speech.position.y = 3.0; this.speech.scale.set(4.4, 0.6, 1); this.speech.visible = false; this.group.add(this.speech); this.speechUntil = 0; this.lastBuild = 0;
     // context bar
     this.barBg = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.08), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthWrite: false }));
     this.bar = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.06), new THREE.MeshBasicMaterial({ color: 0x39d98a, depthWrite: false }));
@@ -699,7 +699,7 @@ class Avatar {
   routeTo(target) { this.path = computePath(this.pos, target); }
   playing() { return !!(lastPlay?.active && lastPlay.players.some((p) => p.id === this.id)); }
   playSpot() { const i = Math.max(0, lastPlay.players.findIndex((p) => p.id === this.id)); const [x, z] = PLAY_SPOTS[i % PLAY_SPOTS.length]; return new THREE.Vector3(x, 0, z); }
-  speak(text) { updateSprite(this.speech, text.length > 46 ? text.slice(0, 45) + '…' : text, { size: 38, color: '#111', bg: 'rgba(255,255,255,0.95)' }); this.speech.visible = true; this.speechUntil = Date.now() + 7000; }
+  speak(text) { updateSprite(this.speech, text.length > 46 ? text.slice(0, 45) + '…' : text, { size: 38, color: '#f3f5ff', bg: 'rgba(12,14,30,0.88)' }); this.speech.visible = true; this.speechUntil = Date.now() + 7000; }
   decide(force = false) {
     const w = this.wants();
     if (this.desk.dept !== this.dept()) { // moved to another department: take a desk there
@@ -846,7 +846,7 @@ class Manager {
     this.group = new THREE.Group(); this.group.userData.manager = true;
     buildBody(this, { skin: 0xe8b894, hair: 0x2b1b12, shirt: 0x1b1f3a, pants: 0x12142a, hat: 0xffb020, tie: 0xff4d6d, clipboard: true });
     this.nameSprite = textSprite('floor manager', { size: 44, color: '#ffb020', bg: 'rgba(12,14,30,0.8)' }); this.nameSprite.position.y = 2.35; this.nameSprite.scale.set(2.6, 0.42, 1); this.group.add(this.nameSprite);
-    this.bubble = textSprite('', { size: 40, color: '#111', bg: 'rgba(255,255,255,0.95)' }); this.bubble.position.set(0, 2.85, 0); this.bubble.scale.set(4.4, 0.6, 1); this.bubble.visible = false; this.group.add(this.bubble);
+    this.bubble = textSprite('', { size: 40, color: '#f3f5ff', bg: 'rgba(12,14,30,0.88)' }); this.bubble.position.set(0, 2.85, 0); this.bubble.scale.set(4.4, 0.6, 1); this.bubble.visible = false; this.group.add(this.bubble);
     this.pos = new THREE.Vector3(11, 0, 6.4); this.group.position.copy(this.pos); this.yaw = Math.PI; this.t = 0; this.path = []; this.waitUntil = 0;
     this.task = null; // { targetId, text, phase: 'walk'|'talk'|'done', until }
     this.bubbleUntil = 0; this.jumpV = 0; this.jumpY = 0; this.faceId = null; this.huddling = false;
@@ -866,7 +866,7 @@ class Manager {
     this.say('Go!', { color: '#fff', bg: 'rgba(57,217,138,0.95)', ms: 3500 }); this.jumpV = 2.6; burstConfetti(this.pos.x, 2.0, this.pos.z, 0xffb020);
     this.goHome(); for (const av of avatars.values()) av.decide(true);
   }
-  say(text, { color = '#111', bg = 'rgba(255,255,255,0.95)', ms = 6000 } = {}) {
+  say(text, { color = '#f3f5ff', bg = 'rgba(12,14,30,0.88)', ms = 6000 } = {}) {
     updateSprite(this.bubble, text.length > 44 ? text.slice(0, 43) + '…' : text, { size: 40, color, bg }); this.bubble.visible = true; this.bubbleUntil = Date.now() + ms;
   }
   walkTo(id) {
@@ -1034,6 +1034,7 @@ function stepScreen(d) { if (!screen) return; screen.i = (screen.i + d + screen.
 $('#sClose').onclick = closeScreen; $('#sPrev').onclick = () => stepScreen(-1); $('#sNext').onclick = () => stepScreen(1);
 $('#sDots').onclick = (e) => { if (e.target.dataset.j !== undefined) { screen.i = Number(e.target.dataset.j); renderScreen(); } };
 screenEl.addEventListener('click', (e) => { if (e.target === $('#sBody')) closeScreen(); }); // click the dark around it to close
+window.__officeSay = (text = 'Here, taking the top corner of the octopus') => { for (const av of avatars.values()) av.speak(text); manager?.say(text); return 'ok'; }; // debug hook: everyone talks at once
 window.__officeScreen = (urls) => openScreen((urls || ['/favicon.svg']).map((u) => ({ url: u, kind: /\.html?$/.test(u) ? 'html' : 'image', name: u.split('/').pop() })), { name: 'debug', dept: 'uiux' }); // debug hook
 // ---------- the reports inbox ----------
 const reportsPanel = $('#reports'), rList = $('#rList'), rBadge = $('#rBadge'), rCount = $('#rCount');
