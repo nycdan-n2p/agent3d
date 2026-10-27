@@ -12,7 +12,13 @@ const api = (url, opts = {}) => fetch(url, { ...opts, headers: { ...opts.headers
 // ============================================================ setup
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
-const HOME = new THREE.Vector3(16, 14, 20);
+// Your office is on the mezzanine at the front of the room; the camera starts there, looking down over
+// the floor. "overview" swings out to the old corner view.
+const MEZZ = { y: 4.6, z0: 11, z1: 15, deskX: 0, deskZ: 13.6 };
+const HOME = new THREE.Vector3(3.5, 8.2, 16.8);
+const HOME_TARGET = new THREE.Vector3(0, 0.2, -4.5);
+const OVERVIEW = new THREE.Vector3(16, 14, 20);
+const OVERVIEW_TARGET = new THREE.Vector3(0, 1, -1);
 camera.position.copy(HOME);
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -24,10 +30,10 @@ renderer.toneMappingExposure = 1.05;
 document.body.prepend(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1, -1);
+controls.target.copy(HOME_TARGET);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-controls.autoRotate = true;
+controls.autoRotate = false; // the balcony view stays put; "orbit" turns the slow spin on
 controls.autoRotateSpeed = 0.35;
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.minDistance = 4;
@@ -487,6 +493,39 @@ function buildDesk(x, z, register = true) {
 }
 for (const k of DEPT_ORDER) for (const z of DESK_ROWS) for (const dx of [-1.8, 1.8]) buildDesk(DEPTS[k].cx + dx, z);
 buildRoom();
+// ---------- the mezzanine: your office, up the stairs, looking down over the floor ----------
+function buildMezzanine() {
+  const g = new THREE.Group(); scene.add(g);
+  const depth = MEZZ.z1 - MEZZ.z0, zc = (MEZZ.z0 + MEZZ.z1) / 2;
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(ROOM.w, 0.3, depth), mat(0x1f2242, { roughness: 0.8 })); slab.position.set(0, MEZZ.y - 0.15, zc); slab.castShadow = true; slab.receiveShadow = true; g.add(slab);
+  const carpet = new THREE.Mesh(new THREE.BoxGeometry(ROOM.w - 0.4, 0.04, depth - 0.3), mat(0x3b2f5c, { roughness: 1 })); carpet.position.set(0, MEZZ.y + 0.02, zc + 0.1); carpet.receiveShadow = true; g.add(carpet);
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(ROOM.w, 0.06, 0.06), new THREE.MeshStandardMaterial({ color: 0xffb020, emissive: 0xffb020, emissiveIntensity: 1.6 })); edge.position.set(0, MEZZ.y - 0.3, MEZZ.z0); g.add(edge);
+  // glass railing along the open edge, with a gap where the stairs arrive
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fb3ff, transparent: true, opacity: 0.14, roughness: 0.1, metalness: 0.2, side: THREE.DoubleSide, depthWrite: false });
+  const railX0 = -ROOM.w / 2 + 2.6, railLen = ROOM.w - 2.6;
+  const pane = new THREE.Mesh(new THREE.BoxGeometry(railLen, 1.0, 0.05), glass); pane.position.set(railX0 + railLen / 2, MEZZ.y + 0.55, MEZZ.z0 + 0.05); g.add(pane);
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(railLen, 0.07, 0.12), mat(0x3a3f6b, { metalness: 0.5, roughness: 0.4 })); rail.position.set(railX0 + railLen / 2, MEZZ.y + 1.08, MEZZ.z0 + 0.05); rail.castShadow = true; g.add(rail);
+  for (let x = railX0; x <= ROOM.w / 2; x += 3) { const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.1, 0.08), mat(0x3a3f6b)); post.position.set(Math.min(x, ROOM.w / 2 - 0.1), MEZZ.y + 0.55, MEZZ.z0 + 0.05); g.add(post); }
+  // stairs up the left wall: from the lounge floor at z=6 to the balcony at z=11
+  const steps = 10, rise = MEZZ.y / steps, run = (MEZZ.z0 - 6) / steps, sx = -ROOM.w / 2 + 1.35;
+  for (let i = 0; i < steps; i++) {
+    const st = new THREE.Mesh(new THREE.BoxGeometry(2.2, rise, run + 0.02), mat(i % 2 ? 0x2a2f55 : 0x303660, { roughness: 0.7 }));
+    st.position.set(sx, rise * (i + 0.5), 6 + run * (i + 0.5)); st.castShadow = true; st.receiveShadow = true; g.add(st);
+  }
+  const side = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, MEZZ.z0 - 6), glass); side.position.set(sx + 1.13, MEZZ.y * 0.5 + 0.55, (6 + MEZZ.z0) / 2); side.rotation.x = 0; g.add(side);
+  const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, Math.hypot(MEZZ.y, MEZZ.z0 - 6)), mat(0x3a3f6b, { metalness: 0.5 })); hand.position.set(sx + 1.13, MEZZ.y / 2 + 1.05, (6 + MEZZ.z0) / 2); hand.rotation.x = -Math.atan2(MEZZ.y, MEZZ.z0 - 6); g.add(hand);
+  // your desk, facing the floor, with a reading lamp, a plant and a sign
+  const desk = buildDesk(MEZZ.deskX, MEZZ.deskZ, false); desk.group.position.y = MEZZ.y; // chair at the back, monitor toward the railing: you look over the floor
+  drawScreen(desk.screen, 'think', 'AGENT OFFICE'); desk.screen.userData.key = 'you';
+  const lamp = new THREE.PointLight(0xffe2b8, 6, 10, 1.6); lamp.position.set(MEZZ.deskX, MEZZ.y + 2.4, MEZZ.deskZ + 1.5); g.add(lamp);
+  const bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0xffe2b8, emissive: 0xffe2b8, emissiveIntensity: 1.6 })); bulb.position.set(MEZZ.deskX, ROOM.h - 0.8, MEZZ.deskZ); g.add(bulb);
+  const p1 = plant(-4.5, MEZZ.z1 - 0.9, 1.1); p1.position.y = MEZZ.y; g.add(p1);
+  const p2 = plant(4.5, MEZZ.z1 - 0.9, 1.0); p2.position.y = MEZZ.y; g.add(p2);
+  const sofa = couch(9, MEZZ.z1 - 1.2, 0); sofa.position.y = MEZZ.y; g.add(sofa);
+  const sign = textSprite('YOUR OFFICE', { size: 54, color: '#111', bg: 'rgba(255,176,32,0.92)' }); sign.position.set(MEZZ.deskX, MEZZ.y + 3.0, MEZZ.deskZ - 0.6); sign.scale.set(4.2, 0.66, 1); g.add(sign);
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(2.4, 32), mat(0x8a4b8f, { roughness: 1 })); rug.rotation.x = -Math.PI / 2; rug.position.set(MEZZ.deskX, MEZZ.y + 0.05, MEZZ.deskZ + 0.6); rug.receiveShadow = true; g.add(rug);
+}
+buildMezzanine();
 function claimDesk(id, dept) {
   let d = desks.find((d) => d.agentId === id && (!dept || d.dept === dept)); if (d) return d;
   releaseDesk(id);
@@ -602,6 +641,8 @@ class Avatar {
       if (this.mode !== 'desk' || force) { this.mode = 'desk'; this.routeTo(new THREE.Vector3(this.desk.x, 0, this.desk.z + 1.1)); }
     } else if (this.pendingReports.length) {
       if (this.mode !== 'report' || force) { this.mode = 'report'; this.seated = false; this.routeTo(OFFICE.drop.clone()); }
+    } else if (huddle) { // the manager is handing out a plan: gather round
+      if (this.mode !== 'huddle' || force) { this.mode = 'huddle'; this.seated = false; this.waitUntil = 0; this.routeTo(huddleSpot(this.id)); }
     } else {
       if (this.mode !== 'wander' || force) { this.mode = 'wander'; this.seated = false; this.waitUntil = 0; this.routeTo(this.randomLoungePoint()); }
     }
@@ -617,6 +658,9 @@ class Avatar {
       const target = this.path[0]; const d = target.clone().sub(this.pos); d.y = 0; const dist = d.length();
       if (dist < 0.08) { this.path.shift(); if (!this.path.length && this.mode === 'desk') this.seated = true; if (!this.path.length && this.mode === 'report') this.dropReports(); }
       else { moving = true; const step = Math.min(dist, speed * dt); this.pos.addScaledVector(d.normalize(), step); this.yaw = Math.atan2(d.x, d.z); }
+    } else if (this.mode === 'huddle') {
+      if (!huddle) this.decide(true);
+      else if (manager) this.yaw = Math.atan2(manager.pos.x - this.pos.x, manager.pos.z - this.pos.z); // listen to the manager
     } else if (this.mode === 'wander' || this.mode === 'report') {
       if (!this.waitUntil) this.waitUntil = now + rand(1500, 5000);
       if (now > this.waitUntil) { this.waitUntil = 0; this.mode = 'wander'; this.routeTo(this.randomLoungePoint()); }
@@ -643,14 +687,14 @@ class Avatar {
     else if (needsYou && !moving) { const wave = Math.sin(this.t * 9) * 0.35; this.arms[0].rotation.x = Math.PI - 0.3 + wave; this.arms[1].rotation.x = Math.PI - 0.3 - wave; this.arms[0].rotation.z = -0.4; this.arms[1].rotation.z = 0.4; }
     else { this.arms[0].rotation.x = -swing * 0.8; this.arms[1].rotation.x = swing * 0.8; this.arms[0].rotation.z = 0; this.arms[1].rotation.z = 0; }
     if (seated) { this.body.position.y = -0.3; } else this.body.position.y = moving ? Math.abs(Math.sin(this.t * 10)) * 0.06 : 0;
-    this.head.rotation.x = this.mode === 'play' && !moving ? 0.35 : typing ? 0.12 + Math.sin(this.t * 1.7) * 0.05 : (w === 'work' ? Math.sin(this.t * 0.9) * 0.15 : 0);
+    this.head.rotation.x = this.mode === 'play' && !moving ? 0.35 : typing ? 0.12 + Math.sin(this.t * 1.7) * 0.05 : (w === 'work' ? Math.sin(this.t * 0.9) * 0.15 : this.mode === 'huddle' && !moving ? Math.max(0, Math.sin(this.t * 2.2 + this.id)) * 0.18 : 0);
     this.head.rotation.y = w === 'work' && !typing ? Math.sin(this.t * 0.7) * 0.35 : 0;
     this.mouth.scale.y = needsYou ? 2.5 : 1;
     // jump / bounce for permission
     if (needsYou && !moving && this.jumpY <= 0 && Math.random() < dt * (w === 'permission' ? 2.5 : 1.2)) this.jumpV = w === 'permission' ? 3.0 : 2.2;
     this.jumpV -= 9.8 * dt; this.jumpY = Math.max(0, this.jumpY + this.jumpV * dt); if (this.jumpY === 0 && this.jumpV < 0) this.jumpV = 0;
     // --- labels + bubble
-    updateSprite(this.nameSprite, this.name(), { size: 44, color: '#e8ecff', bg: 'rgba(12,14,30,0.75)' });
+    updateSprite(this.nameSprite, a.role === 'planner' ? `${this.name()} · planner` : this.name(), { size: 44, color: a.role === 'planner' ? '#ffb020' : '#e8ecff', bg: 'rgba(12,14,30,0.75)' });
     let status = ''; let statusColor = '#39d98a';
     if (w === 'permission' || w === 'question') { status = a.ask?.kind === 'question' ? a.ask.question.slice(0, 40) : a.ask?.kind === 'permission' ? `may I run ${prettyTool(a.ask.tool)}?` : 'needs your approval'; statusColor = '#ff4d6d'; }
     else if (typing && this.mode === 'play') { const t = tools[tools.length - 1]; const lm = /lego\.mjs"?\s+\d+\s+(\w+)/.exec(t.status || ''); status = LEGO_ACTIONS[lm?.[1]] || 'playing'; statusColor = '#39d98a'; }
@@ -658,6 +702,7 @@ class Avatar {
     else if (w === 'work') { status = 'thinking' + '.'.repeat(1 + (Math.floor(this.t * 2) % 3)); statusColor = '#d6dcff'; }
     else if (w === 'question') { status = 'asked you a question'; statusColor = '#ffb020'; }
     else if (this.pendingReports.length) { status = `filing a ${deptOf(this.pendingReports[0].dept).name} report`; statusColor = '#ffb020'; }
+    else if (this.mode === 'huddle' && !moving) { status = 'listening'; statusColor = '#ffb020'; }
     this.statusSprite.visible = !!status;
     if (status) updateSprite(this.statusSprite, status, { size: 40, color: statusColor, bg: 'rgba(12,14,30,0.78)' });
     const idleFor = now - (a.lastEvent || 0);
@@ -723,8 +768,22 @@ class Manager {
     this.bubble = textSprite('', { size: 40, color: '#111', bg: 'rgba(255,255,255,0.95)' }); this.bubble.position.set(0, 2.85, 0); this.bubble.scale.set(4.4, 0.6, 1); this.bubble.visible = false; this.group.add(this.bubble);
     this.pos = new THREE.Vector3(11, 0, 6.4); this.group.position.copy(this.pos); this.yaw = Math.PI; this.t = 0; this.path = []; this.waitUntil = 0;
     this.task = null; // { targetId, text, phase: 'walk'|'talk'|'done', until }
-    this.bubbleUntil = 0; this.jumpV = 0; this.jumpY = 0; this.faceId = null;
+    this.bubbleUntil = 0; this.jumpV = 0; this.jumpY = 0; this.faceId = null; this.huddling = false;
     scene.add(this.group);
+  }
+  // a plan came back: stand in the lounge, call everyone over, and read the parts out one by one
+  startHuddle(f) {
+    const lines = f.parts.map((t) => `${t.n}. ${deptOf(t.dept).name}: ${t.title}`);
+    huddle = { center: HUDDLE_CENTER.clone(), lines, i: -1, nextAt: 0, slots: new Map(), planner: f.planner, until: Date.now() + 60000 };
+    this.task = null; this.faceId = null; this.facePoint = null; this.huddling = true;
+    this.path = computePath(this.pos, HUDDLE_CENTER.clone());
+    this.say(`Everyone, gather round: ${f.planner}'s plan, ${lines.length} parts`, { ms: 7000 }); this.jumpV = 2.0;
+    for (const av of avatars.values()) av.decide(true);
+  }
+  endHuddle() {
+    huddle = null; this.huddling = false;
+    this.say('Go!', { color: '#fff', bg: 'rgba(57,217,138,0.95)', ms: 3500 }); this.jumpV = 2.6; burstConfetti(this.pos.x, 2.0, this.pos.z, 0xffb020);
+    this.goHome(); for (const av of avatars.values()) av.decide(true);
   }
   say(text, { color = '#111', bg = 'rgba(255,255,255,0.95)', ms = 6000 } = {}) {
     updateSprite(this.bubble, text.length > 44 ? text.slice(0, 43) + '…' : text, { size: 40, color, bg }); this.bubble.visible = true; this.bubbleUntil = Date.now() + ms;
@@ -743,7 +802,16 @@ class Manager {
       const target = this.path[0]; const d = target.clone().sub(this.pos); d.y = 0; const dist = d.length();
       if (dist < 0.08) this.path.shift();
       else { moving = true; this.pos.addScaledVector(d.normalize(), Math.min(dist, 3.2 * dt)); this.yaw = Math.atan2(d.x, d.z); }
-    } else if (this.task && this.task.phase === 'walk' && !this.task.pendingTarget) {
+    } else if (this.huddling && huddle) { // at the huddle spot: read the plan out, a part every few seconds
+      if (!huddle.nextAt) huddle.nextAt = now + 2500; // let them walk over first
+      if (now > huddle.nextAt) {
+        huddle.i++;
+        if (huddle.i < huddle.lines.length) { this.say(huddle.lines[huddle.i], { ms: 4200 }); this.jumpV = 1.2; huddle.nextAt = now + 4500; }
+        else this.endHuddle();
+      }
+      this.yaw += dt * 0.7; // turn to face the ring
+    } else if (this.huddling) { this.endHuddle(); }
+    else if (this.task && this.task.phase === 'walk' && !this.task.pendingTarget) {
       this.task.phase = 'talk'; this.say(this.task.text, { ms: 7000 }); this.jumpV = 2.0;
       if (!this.task.pending) { this.task.phase = 'done'; this.task.until = now + 7000; } // nothing more is coming back from the bridge
     } else if (!this.task) {
@@ -751,15 +819,15 @@ class Manager {
       if (now > this.waitUntil) { this.waitUntil = 0; this.goHome(); }
     }
     if (this.task && this.task.pendingTarget && avatars.has(this.task.pendingTarget)) { this.task.targetId = this.task.pendingTarget; this.task.pendingTarget = null; this.task.phase = 'walk'; this.walkTo(this.task.targetId); }
-    if (!moving && this.faceId === null && this.facePoint) this.yaw = Math.atan2(this.facePoint.x - this.pos.x, this.facePoint.z - this.pos.z);
-    if (!moving && this.faceId !== null && avatars.has(this.faceId)) { const p = avatars.get(this.faceId).pos; this.yaw = Math.atan2(p.x - this.pos.x, p.z - this.pos.z); }
+    if (!moving && !this.huddling && this.faceId === null && this.facePoint) this.yaw = Math.atan2(this.facePoint.x - this.pos.x, this.facePoint.z - this.pos.z);
+    if (!moving && !this.huddling && this.faceId !== null && avatars.has(this.faceId)) { const p = avatars.get(this.faceId).pos; this.yaw = Math.atan2(p.x - this.pos.x, p.z - this.pos.z); }
     if (this.task && this.task.phase === 'done' && now > this.task.until) { this.task = null; this.goHome(); }
     this.jumpV -= 9.8 * dt; this.jumpY = Math.max(0, this.jumpY + this.jumpV * dt); if (this.jumpY === 0 && this.jumpV < 0) this.jumpV = 0;
     this.group.position.set(this.pos.x, this.jumpY, this.pos.z);
     this.group.rotation.y = lerpAngle(this.group.rotation.y, this.yaw, 1 - Math.pow(0.0005, dt));
     const swing = moving ? Math.sin(this.t * 11) * 0.6 : 0;
     this.legs[0].rotation.x = swing; this.legs[1].rotation.x = -swing;
-    const talking = this.bubble.visible && this.task && (this.task.phase === 'talk' || this.task.phase === 'done');
+    const talking = this.bubble.visible && ((this.task && (this.task.phase === 'talk' || this.task.phase === 'done')) || this.huddling);
     this.arms[1].rotation.x = talking ? -1.2 + Math.sin(this.t * 5) * 0.4 : swing * 0.8;
     this.arms[0].rotation.x = -0.9; // clipboard arm
     this.body.position.y = moving ? Math.abs(Math.sin(this.t * 11)) * 0.06 : 0;
@@ -769,6 +837,14 @@ class Manager {
   }
 }
 let manager = null;
+// ---------- the huddle: everyone idle stands in a ring around the manager while he hands out a plan ----------
+let huddle = null; // { center, lines, i, nextAt, slots: Map(agentId -> slot), planner, until }
+const HUDDLE_CENTER = new THREE.Vector3(-3.2, 0, 7.6);
+function huddleSpot(id) { // a fixed slot per agent, spread round the ring in the order they join
+  if (!huddle.slots.has(id)) huddle.slots.set(id, huddle.slots.size);
+  const i = huddle.slots.get(id); const ring = Math.floor(i / 7); const ang = (i % 7) * (Math.PI * 2 / 7) + ring * 0.45 + 0.3; const r = 1.7 + ring * 0.9;
+  return new THREE.Vector3(huddle.center.x + Math.cos(ang) * r, 0, huddle.center.z + Math.sin(ang) * r * 0.8);
+}
 function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; }
 
 function makeDrone(label, color) {
@@ -1054,7 +1130,8 @@ $('#btnOrbit').onclick = (e) => { controls.autoRotate = !controls.autoRotate; e.
 $('#btnSound').onclick = (e) => { soundOn = !soundOn; e.target.classList.toggle('on', soundOn); if (soundOn) chime(); };
 $('#btnNight').onclick = (e) => { nightTarget = nightTarget ? 0 : 1; e.target.textContent = nightTarget ? 'night' : 'day'; e.target.classList.toggle('on', !!nightTarget); };
 $('#btnNight').classList.add('on');
-$('#btnReset').onclick = () => { endReveal(); followId = null; camera.position.copy(HOME); controls.target.set(0, 1, -1); renderRoster(lastAgents); };
+$('#btnReset').onclick = () => { endReveal(); followId = null; camera.position.copy(HOME); controls.target.copy(HOME_TARGET); renderRoster(lastAgents); };
+$('#btnOverview').onclick = () => { endReveal(); followId = null; camera.position.copy(OVERVIEW); controls.target.copy(OVERVIEW_TARGET); renderRoster(lastAgents); };
 addEventListener('keydown', (e) => { if (e.key === 'Escape') { endReveal(); followId = null; renderRoster(lastAgents); } });
 // click to follow
 const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt = null;
@@ -1098,7 +1175,8 @@ function applyState(s) {
   renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
 }
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
-window.__officeDebug = () => ({ issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
+window.__officeCam = (p, t) => { endReveal(); followId = null; camera.position.set(...p); controls.target.set(...t); }; // debug hook: place the camera
+window.__officeDebug = () => ({ huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
   const av = avatars.get(f.id); const name = av ? av.name() : `agent ${f.id}`;
   if (f.kind === 'toolStart') { toolStats.push({ t: Date.now(), kind: toolKind(f.toolName) }); pushFeed('tool', name, (f.status || prettyTool(f.toolName)).replace(/mcp__\S+/g, (m) => prettyTool(m))); }
@@ -1115,9 +1193,10 @@ function applyFx(f) {
     logChat({ who: 'you', name: 'you', text: f.text }); logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });
     manager.task = { targetId: f.id, pendingTarget: null, text: f.action === 'move' ? f.message : f.text, phase: 'walk', until: 0, pending: !!f.pending };
     if (f.action === 'answer') { manager.task = null; manager.say(f.message.split('\n')[0], { ms: 8000 }); manager.jumpV = 1.6; }
-    else if (f.action === 'queue') { if (avatars.has(f.id)) manager.walkTo(f.id); else manager.task = null; manager.say(f.message.replace(/^Queue: /, ''), { ms: 9000 }); }
+    else if (manager.huddling) { manager.task = null; if (f.action !== 'queue') manager.say(f.message.split('\n')[0], { ms: 6000 }); } // stay in the huddle; the parts go out from here
+    else if (f.action === 'queue') { if (avatars.has(f.id)) manager.walkTo(f.id); else manager.task = null; manager.say(f.message.replace(/^(Queue|Plan): /, ''), { ms: 9000 }); }
     else if (f.id !== null && f.id !== undefined && avatars.has(f.id)) manager.walkTo(f.id);
-    else if (f.action === 'launch' || f.action === 'handoff') { manager.say(f.message.split('\n')[0], { ms: 20000 }); }
+    else if (f.action === 'launch' || f.action === 'handoff' || f.action === 'plan') { manager.say(f.message.split('\n')[0], { ms: 20000 }); }
     else if (f.action === 'play' && f.ok) manager.walkToTable();
     else { manager.task = null; manager.say(f.message, { color: '#fff', bg: 'rgba(255,77,109,0.95)', ms: 9000 }); }
     if (f.action !== 'answer') toast(f.message.split('\n')[0]);
@@ -1132,9 +1211,14 @@ function applyFx(f) {
     toast(`Playtime's over (${f.reason}): ${what}, ${f.bricks} bricks`); pushFeed('manager', 'floor manager', `playtime over: ${what}`); return;
   }
   if (f.kind === 'managerTarget') { if (manager.task) { manager.task.pendingTarget = f.id; manager.task.phase = 'walk'; } return; }
+  if (f.kind === 'huddle') {
+    manager.startHuddle(f); chime();
+    logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: true });
+    toast(`${f.planner}'s plan: ${f.parts.length} parts. Everyone to the huddle.`); pushFeed('manager', 'floor manager', `huddle: ${f.planner}'s plan, ${f.parts.length} parts`); drawBoard(lastAgents); return;
+  }
   if (f.kind === 'managerDone') {
     const until = Date.now() + 5000;
-    if (manager.task) { manager.task.phase = 'done'; manager.task.until = until; }
+    if (manager.task && !manager.huddling) { manager.task.phase = 'done'; manager.task.until = until; }
     manager.say(f.message, f.ok ? { color: '#fff', bg: 'rgba(57,217,138,0.95)', ms: 5000 } : { color: '#fff', bg: 'rgba(255,77,109,0.95)', ms: 8000 });
     if (f.ok && avatars.has(f.id)) { const av = avatars.get(f.id); av.jumpV = 2.5; burstConfetti(av.pos.x, 2, av.pos.z, av.color.getHex()); }
     logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });

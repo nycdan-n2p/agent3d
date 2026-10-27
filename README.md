@@ -69,11 +69,15 @@ Say `play` (or press 🧱 play) and the floor manager hands every idle agent he 
 
 Click an agent to open his screen: current tool, recent activity, context usage, sub-agents, and for launched agents the raw terminal with a reply box (send text, Enter, 1, 2, Esc) so you can answer prompts without leaving the office. When an agent needs your approval or asks a question, he stands up, turns around, and jumps.
 
+## Your office upstairs
+
+A mezzanine runs along the front of the room, up a flight of stairs on the left: your own desk, a sofa and plants, behind a glass railing that looks down over all four bays, the lounge and the floor manager's office. The camera starts there, and `🪜 my office` brings it back; `overview` swings out to a corner view of the whole floor, and `orbit` turns the slow spin on. Say `put away the lego` (or `clear the table`) when you have seen enough of a build and the play table disappears from the lounge, with the build saved under `builds/shelf/`.
+
 ## Controls
 
 - drag to orbit, scroll to zoom
 - click a person (or a roster row) to follow them, `esc` to let go
-- `orbit` toggles auto-rotate, `sound` chimes when an agent finishes, `night`/`day` switches lighting
+- `🪜 my office` returns to the balcony view, `overview` to the corner view, `orbit` toggles auto-rotate, `sound` chimes when an agent finishes, `night`/`day` switches lighting
 
 ## Files
 

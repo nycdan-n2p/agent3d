@@ -68,9 +68,14 @@ const NAME_ROLES = {};
 for (const n of ['Ezra', 'Omar', 'Yael', 'Max', 'Hugo', 'Kai', 'Dana']) NAME_ROLES[n] = 'security';
 for (const n of ['Felix', 'Iris', 'Lila', 'Rosa', 'Clara', 'Mira', 'Zoe']) NAME_ROLES[n] = 'uiux';
 for (const n of ['Nora', 'Nina', 'Tess', 'Theo', 'Ruby', 'Leo', 'Ivy', 'Talia']) NAME_ROLES[n] = 'qa';
+// Jonah, Adam and Ben are planners: the manager takes a big request to one of them, and they break
+// it into parts the specialists do in parallel. A planner sits in Engineering.
+for (const n of ['Jonah', 'Adam', 'Ben']) NAME_ROLES[n] = 'planner';
 for (const n of HUMAN_NAMES) NAME_ROLES[n] ??= 'engineering';
 function roleOf(a) { return a.role || NAME_ROLES[String(a.humanName || '').split(' ')[0]] || 'engineering'; }
-function applyRole(a) { const d = roleOf(a); if (a.dept !== d) { a.dept = d; a.deptReason = a.role ? 'assigned by you' : `${a.humanName}'s job`; markDirty(); } }
+function deptOfRole(r) { return r === 'planner' ? 'engineering' : r; }
+function isPlanner(a) { return roleOf(a) === 'planner'; }
+function applyRole(a) { const r = roleOf(a); const d = deptOfRole(r); if (a.dept !== d) { a.dept = d; a.deptReason = a.role ? 'assigned by you' : r === 'planner' ? `${a.humanName} is a planner` : `${a.humanName}'s job`; markDirty(); } }
 const NAMES_FILE = path.join(__dirname, 'names.json');
 let savedNames = {}; // jsonlFile -> { humanName, nickname, role }
 try { savedNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')) || {}; } catch { /* none yet */ }
@@ -188,6 +193,8 @@ const DEPT_RULES = [
   ['uiux', /\.(css|scss|sass|less|html?|svg|vue|svelte)\b|\b(ui|ux|ui\/ux|design|designer|styling|styles?|stylesheet|layout|responsive|frontend|front-end|tailwind|figma|screenshot|mockup|wireframe|artifact|theme|dark mode|fonts?|typography|icons?|animation|three\.js|canvas)\b/i],
 ];
 const DEPT_ALIASES = { eng: 'engineering', engineering: 'engineering', dev: 'engineering', qa: 'qa', test: 'qa', testing: 'qa', ui: 'uiux', ux: 'uiux', uiux: 'uiux', 'ui/ux': 'uiux', design: 'uiux', sec: 'security', security: 'security' };
+const JOB_ALIASES = { ...DEPT_ALIASES, planner: 'planner', planning: 'planner', plan: 'planner' };
+const JOB_NAMES = { ...DEPT_NAMES, planner: 'Planning' };
 function classifyText(text) { for (const [d, re] of DEPT_RULES) if (re.test(text || '')) return d; return null; }
 function setDept(a, dept, reason = '') {
   if (!dept || a.dept === dept) return false;
@@ -195,8 +202,8 @@ function setDept(a, dept, reason = '') {
   logEvent(a, 'dept', `moved to ${DEPT_NAMES[dept]}${reason ? ` (${reason})` : ''}`); markDirty(); fx('dept', a.id, { dept, reason: a.deptReason });
   return true;
 }
-function assignRole(a, dept, reason = 'assigned by you') { // a lasting job change, remembered with the name
-  a.role = dept; const changed = setDept(a, dept, reason); saveName(a); return changed;
+function assignRole(a, job, reason = 'assigned by you') { // a lasting job change, remembered with the name
+  const was = roleOf(a); a.role = job; const changed = setDept(a, deptOfRole(job), reason) || was !== job; saveName(a); markDirty(); return changed;
 }
 // The transcript of the current turn: the prompt that started it, the assistant's text, and the
 // desktop app's wrap-up recap when there is one.
@@ -300,8 +307,9 @@ function captureReport(a, attempt = 0) {
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
   logEvent(a, 'report', r.asked ? 'asked a question' : `filed a ${DEPT_NAMES[a.dept]} report`);
-  if (reply) { r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId); if (w && w.agentId === a.id) { r.branch = w.branch; if (!r.asked) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } } logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r); }
+  if (reply) { r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId); if (w && w.agentId === a.id) { r.branch = w.branch; if (!r.asked) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } } logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r).then(() => { if (!r.asked) planProgress(reply.issueId, r); }); }
   fx('report', a.id, { report: r });
+  if (reply && reply.plan) { if (r.asked) pendingReplies.set(a.id, reply); else handlePlanReport(a, r, reply.plan).catch((e) => console.log('[plan]', e.message)); return; }
   const h = !r.asked && reply && hops < MAX_HOPS && parseHandoff(r.text);
   if (h && h.dept !== a.dept) dispatchHandoff(a, r, h, hops + 1);
   else if (h) logChat('manager', 'floor manager', `${r.name} asked for a ${DEPT_NAMES[h.dept]} handoff, but that's their own job: ignored.`, { ok: false });
@@ -334,7 +342,8 @@ function reduce(m) {
     }
     case 'agentClosed': agents.delete(m.id); detachTerminal(m.id); markDirty(); fx('agentClosed', m.id); break;
     case 'terminalSessionOpened': { const a = ensure(m.agentId); a.hasTerminal = true; attachTerminal(m.agentId); markDirty(); break; }
-    case 'terminalSessionClosed': { const a = ensure(m.agentId); a.hasTerminal = false; detachTerminal(m.agentId); markDirty(); break; }
+    // arrives after agentClosed when we close a pty agent: don't bring it back as a ghost
+    case 'terminalSessionClosed': { const a = agents.get(m.agentId); if (a) a.hasTerminal = false; detachTerminal(m.agentId); markDirty(); break; }
     case 'agentStatus': {
       const a = ensure(m.id);
       const was = a.status;
@@ -493,9 +502,10 @@ function parseRequest(text) {
   if ((m = t.match(/^(?:in|at)\s+(\S+)\s*[:,-]\s*(.+)$/i)) && !findAgent(m[1])) return { kind: 'launch', dir: m[1], prompt: m[2].trim() };
   if ((m = t.match(/^@([^\s:,-]+)\s*[:,-]?\s*(.+)$/))) return { kind: 'agent', name: m[1], prompt: m[2].trim() };
   if ((m = t.match(/^(?:tell|ask|have|get|let|make)\s+(?:the\s+)?(\S+?)(?:\s+agent)?\s+(?:to\s+)?(.+)$/i))) return { kind: 'agent', name: m[1].replace(/[:,]$/, ''), prompt: m[2].trim() };
+  if ((m = t.match(/^(?:plan|project|big task|break (?:this |it )?down|split(?: this| it)?(?: up)?)\s*[:,-]\s*([\s\S]+)$/i))) return { kind: 'any', plan: true, prompt: m[1].trim() };
   if ((m = t.match(/^(\S+?)\s*[:,]\s*(.+)$/))) return DEPT_ALIASES[m[1].toLowerCase()] ? { kind: 'any', prompt: t } : { kind: 'agent', name: m[1], prompt: m[2].trim() };
-  // mention anywhere
-  for (const a of agents.values()) { const n = agentName(a).toLowerCase(); if (n.length > 2 && t.toLowerCase().includes(n)) return { kind: 'agent', name: n, prompt: t }; }
+  // mention anywhere (whole word, so "same" is not Sam)
+  for (const a of agents.values()) { const n = agentName(a).toLowerCase(); if (n.length > 2 && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return { kind: 'agent', name: n, prompt: t }; }
   return { kind: 'any', prompt: t };
 }
 async function launchAgent(dir) {
@@ -591,6 +601,10 @@ function statusAnswer(text) {
     if (!issues.length) return 'The board is clear: no open tasks.';
     return `${issues.length} open:\n` + issues.slice(0, 12).map((i) => `${i.id} P${i.priority} ${i.status === 'in_progress' ? '◐' : '○'} ${i.title}${i.assignee ? ` (${i.assignee})` : ''}`).join('\n') + (issues.length > 12 ? `\n…and ${issues.length - 12} more` : '');
   }
+  if (/^(plans?|the plan|plan status|what(?:'s| is) the plan)$/.test(t)) {
+    if (!plans.size) return 'No plan is running. Give me a big task, or say "plan: <task>", and I\'ll have a planner split it up.';
+    return [...plans.values()].map(describePlan).join('\n');
+  }
   if (/^(skills|what skills|who (?:can|does) what skills?|skill list)$/.test(t)) return Object.keys(DEPT_SKILLS).map((d) => `${DEPT_NAMES[d]}: ${DEPT_SKILLS[d].map((k) => `/${k.skill}`).join(', ')}`).join('\n');
   if ((m = t.match(/^what (?:can|does) (.+?) (?:do|know|handle|run)$/))) {
     const a = findAgent(m[1]); if (!a) return `Nobody here is called "${m[1]}".`;
@@ -623,12 +637,12 @@ function parseRename(text) {
   return m ? { name: m[1].replace(/^@/, ''), to: m[2].replace(/^["']|["']$/g, '') } : null;
 }
 function parseMove(text) {
-  const DEPT_WORDS = 'qa|security|sec|engineering|eng|dev|ui\\s*\\/?\\s*ux|ui|ux|design|test(?:ing)?';
+  const DEPT_WORDS = 'qa|security|sec|engineering|eng|dev|ui\\s*\\/?\\s*ux|ui|ux|design|test(?:ing)?|planner|planning';
   const m = text.trim().match(new RegExp(`^(?:send|move|put|assign|transfer)\\s+(.+?)\\s+(?:to|into)\\s+(?:the\\s+)?(${DEPT_WORDS})(?:\\s+(?:dept|department|team|room|office))?\\s*[.!]?$`, 'i'))
     || text.trim().match(new RegExp(`^(?:make|set)\\s+(.+?)\\s+(?:an?\\s+|the\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'))
     || text.trim().match(new RegExp(`^(.+?)\\s+(?:is|should be|will be|becomes)\\s+(?:an?\\s+|the\\s+|our\\s+)?(${DEPT_WORDS})(?:\\s+(?:agent|specialist|engineer|person|guy|dev))?\\s*[.!]?$`, 'i'));
   if (!m) return null;
-  return { name: m[1], dept: DEPT_ALIASES[m[2].toLowerCase().replace(/\s+/g, '')] };
+  return { name: m[1], dept: JOB_ALIASES[m[2].toLowerCase().replace(/\s+/g, '')] };
 }
 // ---------- specialists: who takes a task, and bringing one in when nobody with that job is free ----------
 // ---------- skills: each job owns the skills installed on this Mac that do that job ----------
@@ -666,7 +680,7 @@ function skillFor(dept, prompt, { defaultOk = true } = {}) {
 function withSkill(prompt, skill) { return skill && !/^\s*\//.test(prompt) ? `/${skill} ${prompt}` : prompt; }
 const HANDOFF_RULE = '\n\n(Office rule: when you are done, if this needs follow-up by QA, Security or UI/UX, end your final reply with one line exactly like "HANDOFF: qa — <what they should do>", using qa, security or uiux.)';
 function pickSpecialist(dept, exceptId = null) {
-  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && a.dept === dept && !playing(a.id));
+  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && a.dept === dept && !isPlanner(a) && !playing(a.id));
   pool.sort((p, q) => ((p.status === 'active' || p.permission || p.awaitingInput) - (q.status === 'active' || q.permission || q.awaitingInput)) || (q.lastEvent - p.lastEvent));
   return pool[0] || null;
 }
@@ -712,24 +726,34 @@ async function eligibleIssues() {
     .filter((i) => !(queue.skipped.get(i.id) > Date.now()))
     .sort((p, q) => (p.priority ?? 2) - (q.priority ?? 2) || String(p.created_at).localeCompare(String(q.created_at)));
 }
+// Parts of a plan are dispatched even while the queue is paused, up to PLAN_WORKERS at once.
+const PLAN_WORKERS = Math.max(1, Number(process.env.OFFICE_PLAN_WORKERS || 4));
+const isPlanIssue = (i) => (i.labels || []).includes('plan');
+function roomFor(issue) {
+  const running = queueRunning();
+  if (isPlanIssue(issue)) return running.filter((w) => w.plan).length < PLAN_WORKERS;
+  return queue.on && running.filter((w) => !w.plan).length < queue.limit;
+}
 async function dispatchQueue() {
-  if (!queue.on || !beadsOk || !upstream.privileged || queue.busy || queueRunning().length >= queue.limit) return;
+  if (!beadsOk || !upstream.privileged || queue.busy) return;
   queue.busy = true;
   try {
-    const next = (await eligibleIssues())[0]; if (!next) return;
-    try { await dispatchIssue(next); }
-    catch (e) {
-      queue.skipped.set(next.id, Date.now() + 10 * 60000); // don't hammer a task that won't start
-      const message = `Couldn't start ${next.id}: ${e.message}. I'll leave it for ten minutes.`;
-      console.log('[queue]', message); logChat('manager', 'floor manager', message, { ok: false }); fx('managerSay', null, { text: next.title, message, ok: false, action: 'answer', pending: false });
+    for (let n = 0; n < 4; n++) { // a plan may free several parts at once
+      const next = (await eligibleIssues()).find(roomFor); if (!next) return;
+      try { await dispatchIssue(next); }
+      catch (e) {
+        queue.skipped.set(next.id, Date.now() + 10 * 60000); // don't hammer a task that won't start
+        const message = `Couldn't start ${next.id}: ${e.message}. I'll leave it for ten minutes.`;
+        console.log('[queue]', message); logChat('manager', 'floor manager', message, { ok: false }); fx('managerSay', null, { text: next.title, message, ok: false, action: 'answer', pending: false });
+      }
     }
   } finally { queue.busy = false; }
 }
 async function dispatchIssue(issue) {
-  const dept = classifyText(`${issue.title} ${issue.description || ''}`) || 'engineering';
+  const dept = (issue.labels || []).map((l) => DEPT_ALIASES[l]).find(Boolean) || classifyText(`${issue.title} ${issue.description || ''}`) || 'engineering';
   const { dir, branch } = await makeWorktree(issue.id);
   const a = await launchSpecialist(dept, dir);
-  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false };
+  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue) };
   queue.workers.set(issue.id, w); markDirty();
   await bd(['update', issue.id, '--assignee', agentName(a), '--status', 'in_progress']).catch(() => {});
   await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}), working in ${dir} on branch ${branch}.`]).catch(() => {});
@@ -739,9 +763,10 @@ async function dispatchIssue(issue) {
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   pendingReplies.set(a.id, { text: `queue: ${issue.title}`, t: Date.now(), issueId: issue.id, hops: 0, skill, queued: true });
   refreshIssues();
-  const message = `Queue: ${agentName(a)} (${DEPT_NAMES[dept]}${skill ? `, running /${skill}` : ''}) picked up ${issue.id} "${issue.title}" in a worktree on ${branch}.`;
+  const message = `${w.plan ? 'Plan' : 'Queue'}: ${agentName(a)} (${DEPT_NAMES[dept]}${skill ? `, running /${skill}` : ''}) picked up ${issue.id} "${issue.title}" in a worktree on ${branch}.`;
   logChat('manager', 'floor manager', message, { ok: true, action: 'queue' });
   fx('managerSay', a.id, { text: `${issue.id}: ${issue.title}`, message, ok: true, action: 'queue', pending: false });
+  const pl = w.plan && planOf(issue.id); if (pl) { const part = pl.parts.find((x) => x.id === issue.id); if (part) { part.by = agentName(a); part.branch = branch; } }
 }
 if (beadsOk) setInterval(dispatchQueue, 15000);
 function parseQueue(text) {
@@ -805,7 +830,173 @@ async function dispatchHandoff(from, r, h, hops = 1) {
     logChat('manager', 'floor manager', message, { ok: true }); fx('managerDone', target.id, { ok: true, message, text });
   } catch (e) { const message = `Handoff failed: ${e.message}`; logChat('manager', 'floor manager', message, { ok: false }); fx('managerDone', target ? target.id : null, { ok: false, message, text }); }
 }
+// ---------- sending idle agents home ----------
+// Office-launched (pty) agents are closed for good; the manager hires fresh specialists when work comes in.
+// Desktop sessions can't be ended from here: pixel-agents just hides them until they're used again.
+const SEND_HOME = /\bsend\s+(?:all\s+)?(?:the\s+)?(?:idle|free|bored)\b.*\bhome\b|\b(?:idle|free|bored)\b.*\b(?:sen[dt]|go(?:ne)?)\s+home\b|\bsen[dt]\s+home\b.*\bidle\b|^(?:please\s+)?dismiss\s+(?:the\s+|all\s+)?idle\b/i;
+const isSendHome = (t) => t.length < 160 && !/^(?:add|build|make|implement|fix|write|create)\b|^@?[\w-]+(?:\s+\d+)?\s*:/i.test(t) && SEND_HOME.test(t);
+function idleForHome(a) {
+  if (a.parentAgentId || a.status === 'active' || a.permission || a.awaitingInput || a.ask || playing(a.id)) return false;
+  if (Date.now() - (a.createdAt || 0) < 120000) return false; // just hired: their task may still be on its way
+  return !queueRunning().some((w) => w.agentId === a.id && !w.done);
+}
+function sendHomeHandle() {
+  const result = { ok: false, action: 'sendHome', targetId: null, message: '' };
+  if (!upstream.privileged) { result.message = "I can't send anyone home: the bridge is read-only (no pixel-agents token found)."; return { result, deliver: null }; }
+  const going = [...agents.values()].filter(idleForHome);
+  if (!going.length) { result.message = 'Nobody is idle: everyone here is working or waiting on you.'; return { result, deliver: null }; }
+  for (const a of going) sendUpstream({ type: 'closeAgent', id: a.id });
+  const hired = going.filter((a) => a.hasTerminal), desk = going.length - hired.length;
+  result.ok = true;
+  result.message = `Sent ${going.length} home: ${going.map(agentName).join(', ')}.` +
+    (desk ? ` ${desk} of them ${desk === 1 ? 'is a desktop session' : 'are desktop sessions'}, so they'll be back when you use them.` : '');
+  return { result, deliver: null };
+}
+// ---------- planning: a big request goes to a planner, who splits it into parts for the specialists ----------
+// The manager takes anything that reads as more than one job (or "plan: <task>") to a planner, a Claude
+// session like the others. The planner reads the code, changes nothing, and answers with a PLAN block.
+// Each part becomes a bead under an epic, with its dependencies, plus a final integration part; the
+// queue then hands every unblocked part to a fresh specialist in its own worktree, several at once.
+const PLAN_CHARS = Number(process.env.OFFICE_PLAN_CHARS || 280);
+function wantsPlan(prompt) {
+  const p = String(prompt || '').trim(); if (p.length < 40) return false;
+  if (p.length > PLAN_CHARS) return true;
+  const sentences = (p.match(/[.!?](\s|$)/g) || []).length;
+  const bullets = (p.match(/^\s*(?:[-*•]|\d+[.)])\s/gm) || []).length;
+  const joins = (p.match(/\b(and then|then|also|as well as|plus|after that|finally|and also|once that|afterwards)\b/gi) || []).length;
+  return sentences >= 3 || bullets >= 2 || joins >= 2 || (p.length > 140 && joins >= 1);
+}
+function pickPlanner() {
+  const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && isPlanner(a) && !playing(a.id));
+  pool.sort((p, q) => ((p.status === 'active' || p.permission || p.awaitingInput) - (q.status === 'active' || q.permission || q.awaitingInput)) || (q.lastEvent - p.lastEvent));
+  return pool[0] || null;
+}
+function plannerPrompt(prompt) {
+  return `You are the planner of this office. The floor manager got a request that is too big for one person and wants it split into parts that different specialists will do at the same time, each in their own git worktree of this project.
+
+The request:
+---
+${prompt}
+---
+
+Read the code as much as you need, but change nothing. Then reply with a plan block, exactly in this format, as the last thing in your message:
+
+PLAN
+1. [engineering] Short title :: what to do, concretely, naming the files to touch (after: none)
+2. [qa] Short title :: what to do (after: 1)
+END PLAN
+
+Rules: 2 to 6 parts. The job in brackets is one of engineering, qa, uiux, security. "after:" lists the part numbers that must be finished first, or none. Parts with no "after" run at the same time in separate worktrees, so give them different files where you can and say in each part what it must not touch. Do not add a merge or integration part: the manager adds that himself. If the request is honestly one job, reply with a one-part PLAN.`;
+}
+const plans = new Map(); // epicId -> { epicId, title, prompt, planner, parts: [{ n, id, dept, title, after, done, by, branch }], integId, integDone, startedAt }
+function planOf(issueId) { for (const p of plans.values()) if (p.integId === issueId || p.parts.some((x) => x.id === issueId)) return p; return null; }
+function describePlan(p) {
+  const done = p.parts.filter((x) => x.done).length;
+  return `${p.epicId} "${p.title}" by ${p.planner}: ${done}/${p.parts.length} parts done\n` + p.parts.map((x) => `  ${x.done ? '●' : x.by ? '◐' : '○'} ${x.id} [${DEPT_NAMES[x.dept]}] ${x.title}${x.by ? ` (${x.by}${x.branch ? `, ${x.branch}` : ''})` : ''}${x.after.length ? ` after ${x.after.join(',')}` : ''}`).join('\n') + (p.integId ? `\n  ${p.integDone ? '●' : '○'} ${p.integId} integrate everything` : '');
+}
+function parsePlanBlock(text) {
+  const m = /^\s*PLAN\s*$([\s\S]*?)^\s*END PLAN\s*$/im.exec(text || ''); const body = m ? m[1] : String(text || '');
+  const parts = [];
+  for (const line of body.split('\n')) {
+    const h = /^\s*(\d+)[.)]\s*\[\s*([a-z /]+?)\s*\]\s*(.+?)\s*$/i.exec(line); if (!h) continue;
+    let rest = h[3]; let after = [];
+    const a = /\(\s*after:\s*([^)]*)\)\s*$/i.exec(rest); if (a) { after = (a[1].match(/\d+/g) || []).map(Number); rest = rest.slice(0, a.index).trim(); }
+    const [title, ...detail] = rest.split(/\s*::\s*/);
+    const dept = DEPT_ALIASES[h[2].toLowerCase().replace(/\s+/g, '')] || classifyText(rest) || 'engineering';
+    parts.push({ n: Number(h[1]), dept, title: title.replace(/[*_`]/g, '').trim().slice(0, 100), detail: detail.join(' :: ').trim(), after });
+  }
+  const nums = new Set(parts.map((p) => p.n));
+  for (const p of parts) p.after = p.after.filter((n) => nums.has(n) && n !== p.n);
+  return parts;
+}
+async function fileEpic(prompt, planner) {
+  if (!beadsOk) return null;
+  const title = prompt.replace(/\s+/g, ' ').trim().slice(0, 90);
+  try {
+    const out = await bd(['create', '--title', title, '--description', `A big request the floor manager took to ${agentName(planner)} (planner) to split into parts.\n\nRequest: ${prompt}`, '--type', 'epic', '--priority', '2', '--labels', 'office,plan', '--json']);
+    const id = JSON.parse(out).id || null; refreshIssues(); return id;
+  } catch (e) { console.log('[beads] epic failed:', e.message); return null; }
+}
+function planHandle(prompt, from, explicit) {
+  const result = { ok: false, action: 'plan', targetId: null, message: '' };
+  if (!beadsOk) { result.message = 'That needs a plan with several parts, but there is no beads database here to track them. Run `bd init` in this folder, or say "@<name>: …" to give it to one person.'; return { result, deliver: null }; }
+  if (!upstream.privileged) { result.message = "That needs splitting up, but the bridge is read-only so I can't bring anyone in."; return { result, deliver: null }; }
+  let planner = pickPlanner();
+  result.ok = true; result.targetId = planner ? planner.id : null;
+  result.message = `${explicit ? 'Right' : "That's a big one"}. ${planner ? `Taking it to ${agentName(planner)} to break it down…` : 'Bringing in a planner to break it down…'}`;
+  return { result, deliver: async () => {
+    if (!planner) planner = await launchSpecialist('planner', homeDirFor(null));
+    const epicId = await fileEpic(prompt, planner);
+    await typeInto(planner.id, plannerPrompt(prompt));
+    logEvent(planner, 'manager', 'splitting a big task');
+    pendingReplies.set(planner.id, { text: from, t: Date.now(), issueId: null, hops: MAX_HOPS, plan: { prompt, from, epicId } });
+    return { targetId: planner.id, message: `${agentName(planner)} is breaking it down${epicId ? ` (${epicId})` : ''}. When the plan is back I'll call everyone over and hand out the parts.` };
+  } };
+}
+async function handlePlanReport(planner, r, plan) {
+  const parts = parsePlanBlock(r.text);
+  if (plan.epicId) bd(['note', plan.epicId, `Plan from ${r.name}:\n${r.text.slice(0, 3000)}`]).catch(() => {});
+  if (parts.length < 2) { // no plan, or one job after all: hand the whole thing to a specialist
+    const why = parts.length ? `${r.name} says it's really one job` : `${r.name} didn't give me a plan I can read`;
+    const prompt = parts.length && parts[0].detail ? `${parts[0].title}: ${parts[0].detail}\n\nThe original request: ${plan.prompt}` : plan.prompt;
+    const dept = (parts[0] && parts[0].dept) || classifyText(prompt) || 'engineering';
+    let target = pickSpecialist(dept);
+    const message = `${why}. Handing the whole thing to ${target ? agentName(target) : `a new ${DEPT_NAMES[dept]} specialist`}.`;
+    logChat('manager', 'floor manager', message, { ok: true, action: 'plan' }); fx('managerSay', target ? target.id : null, { text: plan.from, message, ok: true, action: target ? 'type' : 'launch', pending: true });
+    try {
+      if (!target) target = await launchSpecialist(dept, homeDirFor(planner));
+      const issueId = await giveTask(target, prompt, plan.from, { discoveredFrom: plan.epicId });
+      if (plan.epicId) bd(['close', plan.epicId, '--reason', 'one job after all; handed to a specialist']).catch(() => {});
+      const done = `Told ${agentName(target)} (${DEPT_NAMES[target.dept]})${issueId ? `, filed as ${issueId}` : ''}.`;
+      logChat('manager', 'floor manager', done, { ok: true }); fx('managerDone', target.id, { ok: true, message: done, text: plan.from });
+    } catch (e) { const message = `Couldn't hand it over: ${e.message}`; logChat('manager', 'floor manager', message, { ok: false }); fx('managerDone', null, { ok: false, message, text: plan.from }); }
+    return;
+  }
+  const epicId = plan.epicId || await fileEpic(plan.prompt, planner);
+  const p = { epicId, title: plan.prompt.replace(/\s+/g, ' ').trim().slice(0, 60), prompt: plan.prompt, planner: r.name, parts: [], integId: null, integDone: false, startedAt: Date.now() };
+  const ids = new Map();
+  for (const t of parts) {
+    const others = parts.filter((o) => o !== t).map((o) => `${o.n}. ${o.title}`).join('; ');
+    const description = `Part ${t.n} of ${parts.length} of a plan by ${r.name} (${epicId}).\n\nThe whole request: ${plan.prompt}\n\nThis part: ${t.detail || t.title}\n\nThe other parts run at the same time in other worktrees (${others}): stay inside this part and leave their files alone.${t.after.length ? ` This part starts only after part${t.after.length > 1 ? 's' : ''} ${t.after.join(', ')} ${t.after.length > 1 ? 'are' : 'is'} done; their work is on branches office/<their id>, listed in the epic.` : ''}`;
+    try {
+      const out = await bd(['create', '--title', t.title, '--description', description, '--type', 'task', '--priority', '2', '--labels', `office,plan,${t.dept}`, ...(epicId ? ['--parent', epicId] : []), '--json']);
+      const id = JSON.parse(out).id; ids.set(t.n, id); p.parts.push({ n: t.n, id, dept: t.dept, title: t.title, after: t.after, done: false, by: null, branch: null });
+    } catch (e) { console.log('[plan] create failed:', e.message); }
+  }
+  for (const t of parts) for (const n of t.after) if (ids.has(t.n) && ids.has(n)) await bd(['dep', 'add', ids.get(t.n), ids.get(n)]).catch((e) => console.log('[plan] dep failed:', e.message));
+  if (p.parts.length) {
+    const branches = p.parts.map((x) => `office/${x.id} (${x.title})`).join(', ');
+    try {
+      const out = await bd(['create', '--title', `Integrate: ${p.title}`, '--description', `Last part of the plan ${epicId} by ${r.name}. The parts were done on separate branches: ${branches}. Merge every one of them into your branch, resolve conflicts, run whatever builds and tests this project has, fix what the merge broke, and report what is on the branch and how you verified it. The whole request, for context: ${plan.prompt}`, '--type', 'task', '--priority', '2', '--labels', 'office,plan,engineering', ...(epicId ? ['--parent', epicId] : []), '--deps', p.parts.map((x) => x.id).join(','), '--json']);
+      p.integId = JSON.parse(out).id;
+    } catch (e) { console.log('[plan] integration task failed:', e.message); }
+  }
+  if (epicId) { plans.set(epicId, p); bd(['note', epicId, `Parts: ${p.parts.map((x) => `${x.id} [${x.dept}] ${x.title}`).join('; ')}${p.integId ? `; then ${p.integId} integrates.` : ''}`]).catch(() => {}); }
+  refreshIssues();
+  const lines = p.parts.map((x) => `${x.n}. ${DEPT_NAMES[x.dept]}: ${x.title}${x.after.length ? ` (after ${x.after.join(', ')})` : ''}`);
+  const message = `${r.name}'s plan, ${p.parts.length} parts:\n${lines.join('\n')}\n${p.integId ? `Then ${p.integId} merges it all. ` : ''}Starting every part that isn't waiting on another, up to ${PLAN_WORKERS} at once, each in its own worktree.`;
+  logChat('manager', 'floor manager', message, { ok: true, action: 'plan' });
+  fx('huddle', planner.id, { epicId, message, planner: r.name, parts: p.parts.map((x) => ({ n: x.n, id: x.id, dept: x.dept, title: x.title, after: x.after })) });
+  setTimeout(dispatchQueue, 1500);
+}
+function planProgress(issueId, r) {
+  const p = issueId && planOf(issueId); if (!p) return;
+  if (p.integId === issueId) {
+    p.integDone = true;
+    const message = `Plan "${p.title}" is complete: ${r.name} merged all ${p.parts.length} parts on branch office/${p.integId}. Merge that into main when you're happy with it.`;
+    logChat('manager', 'floor manager', message, { ok: true, action: 'plan' }); fx('managerSay', null, { text: p.title, message, ok: true, action: 'answer', pending: false });
+    plans.delete(p.epicId); if (p.epicId) bd(['close', p.epicId, '--reason', 'all parts integrated']).catch(() => {});
+    return;
+  }
+  const part = p.parts.find((x) => x.id === issueId); if (!part || part.done) return;
+  part.done = true; part.by = r.name; part.branch = part.branch || r.branch || null;
+  const left = p.parts.filter((x) => !x.done).length;
+  const message = left ? `Part ${part.n} of "${p.title}" is in from ${r.name}; ${left} to go.` : `All ${p.parts.length} parts of "${p.title}" are in.${p.integId ? ' Next up: merging them together.' : ''}`;
+  logChat('manager', 'floor manager', message, { ok: true, action: 'plan' }); fx('managerSay', null, { text: p.title, message, ok: true, action: 'answer', pending: false });
+  setTimeout(dispatchQueue, 1500);
+}
 async function managerHandle(text) {
+  if (isSendHome(text.trim())) return sendHomeHandle();
   const playReq = parsePlay(text);
   if (playReq) return playHandle(playReq);
   const result = { ok: false, action: null, targetId: null, message: '' };
@@ -823,8 +1014,8 @@ async function managerHandle(text) {
     const a = findAgent(move.name);
     if (!a) { result.message = `Nobody here is called "${move.name}".`; return { result, deliver: null }; }
     result.ok = true; result.action = 'move'; result.targetId = a.id;
-    if (!assignRole(a, move.dept)) result.message = `${agentName(a)} is already ${DEPT_NAMES[move.dept]}.`;
-    else result.message = `${agentName(a)}, from now on you're ${DEPT_NAMES[move.dept]}.`;
+    if (!assignRole(a, move.dept)) result.message = `${agentName(a)} is already ${JOB_NAMES[move.dept]}.`;
+    else result.message = `${agentName(a)}, from now on you're ${JOB_NAMES[move.dept]}.`;
     return { result, deliver: null };
   }
   const answer = statusAnswer(text);
@@ -843,6 +1034,7 @@ async function managerHandle(text) {
       return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent${issueId ? ` and filed it as ${issueId}` : ''}.` : `New agent is up in ${path.basename(dir)}.` };
     } };
   }
+  if (req.kind === 'any' && (req.plan || wantsPlan(req.prompt))) return planHandle(req.prompt, text, !!req.plan);
   let target = null;
   if (req.kind === 'agent') {
     target = findAgent(req.name);

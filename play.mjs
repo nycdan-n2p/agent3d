@@ -158,6 +158,21 @@ export function createPlayroom({ buildsDir, cli, broadcast, fx, markDirty, prese
     } catch { /* nothing saved yet */ }
   }
   loadLatest();
+  // Take the last build apart to free the floor. Saved builds go to builds/shelf (kept, but no longer
+  // reloaded on start), so the table stays put away across restarts.
+  function clear() {
+    if (s.active) return { ok: false, bricks: 0 };
+    const bricks = s.bricks.size;
+    try {
+      const files = fs.readdirSync(buildsDir).filter((f) => f.endsWith('.json'));
+      if (files.length) fs.mkdirSync(path.join(buildsDir, 'shelf'), { recursive: true });
+      for (const f of files) fs.renameSync(path.join(buildsDir, f), path.join(buildsDir, 'shelf', f));
+    } catch (e) { if (e.code !== 'ENOENT') console.log('[play] could not shelve builds:', e.message); }
+    s = blank(); occ = new Map();
+    broadcast(boardMsg());
+    markDirty();
+    return { ok: true, bricks };
+  }
   setInterval(() => {
     if (!s.active) return;
     if (Date.now() > s.endsAt) end("time's up");
@@ -285,7 +300,7 @@ How to play well
   }
 
   return {
-    api, start, end, invite,
+    api, start, end, invite, clear,
     isActive: () => s.active,
     describe: () => s.title ? `"${s.title}"` : s.theme || 'something unique',
     boardMsg,
