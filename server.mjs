@@ -105,7 +105,7 @@ function logEvent(a, kind, text) {
 const sseClients = new Set();
 let dirty = false;
 function broadcast(obj) { const line = `data: ${JSON.stringify(obj)}\n\n`; for (const res of sseClients) res.write(line); }
-function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta(), issues, beads: beadsOk }; }
+function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta(), issues, beads: beadsOk, queue: queueMeta() }; }
 function markDirty() { dirty = true; }
 setInterval(() => { if (dirty) { dirty = false; broadcast(snapshot()); } }, 50);
 function fx(kind, id, extra = {}) { broadcast({ type: 'fx', kind, id, ...extra }); }
@@ -278,7 +278,7 @@ async function fileTask({ prompt, from, agent, discoveredFrom = null }) {
 async function settleTask(issueId, r) {
   if (!beadsOk || !issueId) return;
   try {
-    const note = `${r.asked ? 'Agent asked a question' : 'Report'} from ${r.name} (${DEPT_NAMES[r.dept]}):\n${(r.text || r.recap).slice(0, 3000)}${r.recap && r.text ? `\n\nRecap: ${r.recap}` : ''}`;
+    const note = `${r.asked ? 'Agent asked a question' : 'Report'} from ${r.name} (${DEPT_NAMES[r.dept]})${r.branch ? ` on branch ${r.branch}` : ''}:\n${(r.text || r.recap).slice(0, 3000)}${r.recap && r.text ? `\n\nRecap: ${r.recap}` : ''}`;
     await bd(['note', issueId, note], { actor: r.name }); // the agent files its own note and closes its own task
     if (!r.asked) await bd(['close', issueId, '--reason', `report filed by ${r.name}`], { actor: r.name });
     refreshIssues();
@@ -300,7 +300,7 @@ function captureReport(a, attempt = 0) {
   reports.push(r); if (reports.length > 300) reports.shift();
   fs.appendFile(REPORTS_FILE, JSON.stringify(r) + '\n', () => {});
   logEvent(a, 'report', r.asked ? 'asked a question' : `filed a ${DEPT_NAMES[a.dept]} report`);
-  if (reply) { r.issueId = reply.issueId || null; logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r); }
+  if (reply) { r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId); if (w && w.agentId === a.id) { r.branch = w.branch; if (!r.asked) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } } logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r); }
   fx('report', a.id, { report: r });
   const h = !r.asked && reply && hops < MAX_HOPS && parseHandoff(r.text);
   if (h && h.dept !== a.dept) dispatchHandoff(a, r, h, hops + 1);
@@ -516,6 +516,7 @@ async function launchAgent(dir) {
 // ---------- playtime ----------
 function parsePlay(text) {
   const t = text.trim();
+  if (/^(?:please\s+)?(?:take\s+apart|tear\s+down|break\s+up|clear(?:\s+away)?|tidy(?:\s+up)?|pack\s+(?:up|away)|put\s+away|dismantle)\s+(?:the\s+|that\s+)?(?:lego|build|board|play\s*table)\b/i.test(t)) return { kind: 'clear' };
   if (/^(?:stop|end|finish|quit)\s+(?:the\s+)?(?:playing|play|playtime|game|lego)\b|^(?:playtime(?:'s| is)? over|back to work)\b/i.test(t)) return { kind: 'stop' };
   const m = t.match(/^(?:ok(?:ay)?[,!]?\s+)?(?:let'?s\s+|go\s+|time\s+to\s+)?(?:play(?:time)?|lego)\b[\s:,!.-]*(.*)$/i);
   if (!m) return null;
@@ -538,6 +539,13 @@ function playHandle(req) {
     if (!play.isActive()) { result.message = "Nobody's playing right now."; return { result, deliver: null }; }
     play.end('stopped by you'); result.ok = true; result.message = 'Playtime is over. Back to work, everyone.';
     return { result, deliver: async () => ({ targetId: null, message: 'Board is saved. Back to work.' }) };
+  }
+  if (req.kind === 'clear') {
+    if (play.isActive()) { result.message = `They're still building ${play.describe()}. Say "stop playing" first.`; return { result, deliver: null }; }
+    const { bricks } = play.clear();
+    result.ok = true;
+    result.message = bricks ? `Took apart ${bricks} bricks and put the table away. The floor is clear.` : 'The table is already put away.';
+    return { result, deliver: null };
   }
   if (play.isActive()) { result.message = `They're already building ${play.describe()}. Say "stop playing" to end it.`; return { result, deliver: null }; }
   if (!upstream.privileged) { result.message = "I can't hand out LEGO: the bridge is read-only (no pixel-agents token found)."; return { result, deliver: null }; }
@@ -649,10 +657,10 @@ const DEPT_SKILLS = {
   ],
 };
 // Which skill a task should run for an agent with this job, or null for plain work.
-function skillFor(dept, prompt) {
+function skillFor(dept, prompt, { defaultOk = true } = {}) {
   const list = DEPT_SKILLS[dept] || []; if (!list.length) return null;
   const hit = list.find((k) => k.trigger.test(prompt)); if (hit) return hit.skill;
-  if (dept !== 'engineering' && classifyText(prompt) === dept) return list[0].skill; // in-job work without a named skill: the job's default
+  if (defaultOk && dept !== 'engineering' && classifyText(prompt) === dept) return list[0].skill; // in-job work without a named skill: the job's default
   return null;
 }
 function withSkill(prompt, skill) { return skill && !/^\s*\//.test(prompt) ? `/${skill} ${prompt}` : prompt; }
@@ -671,10 +679,103 @@ async function launchSpecialist(dept, dir) {
   const id = await launchAgent(dir); const a = agents.get(id);
   a.humanName = pickHumanName(dept); a.role = dept; applyRole(a); markDirty();
   fx('managerTarget', id, { text: '' });
-  const ready = await waitForPrompt(id, { acceptTrust: dir === PLAYROOM });
+  const ready = await waitForPrompt(id, { acceptTrust: dir === PLAYROOM || dir.startsWith(WORKTREES + path.sep) });
   await sleep(ready ? 600 : 0); return a;
 }
 // Type a task into an agent, file it on the board and remember that an answer is owed.
+// ---------- the task queue: ready issues on the board go to fresh specialists, each in its own worktree ----------
+// Any open issue with no assignee and no open blocker is eligible (label it `hold` to keep it back).
+// The manager hires a specialist whose job matches the issue, in a git worktree of this project on
+// branch office/<id>, hands over the task, and the report closes the issue. At most `limit` queue
+// workers run at once; agents you hire yourself don't count.
+const PROJECT = process.env.OFFICE_PROJECT ? path.resolve(process.env.OFFICE_PROJECT) : __dirname;
+const WORKTREES = path.join(PROJECT, '.worktrees');
+const queue = { on: process.env.OFFICE_QUEUE === 'on', // paused until you say "queue on" (or start with OFFICE_QUEUE=on)
+  limit: Math.max(0, Number(process.env.OFFICE_WORKERS || 2)), workers: new Map(), skipped: new Map(), busy: false };
+function git(args) { return new Promise((resolve, reject) => execFile('git', ['-C', PROJECT, ...args], { timeout: 30000 }, (err, out, errOut) => err ? reject(new Error(String(errOut || err.message).trim().slice(0, 300))) : resolve(String(out)))); }
+async function makeWorktree(issueId) {
+  const dir = path.join(WORKTREES, issueId); const branch = `office/${issueId}`;
+  fs.mkdirSync(WORKTREES, { recursive: true });
+  if (fs.existsSync(path.join(dir, '.git'))) return { dir, branch }; // left from an earlier run: reuse it
+  try { await git(['worktree', 'add', '-b', branch, dir, 'HEAD']); }
+  catch (e) { if (!/already exists/.test(e.message)) throw e; await git(['worktree', 'add', dir, branch]); }
+  return { dir, branch };
+}
+function queueRunning() { return [...queue.workers.values()].filter((w) => !w.done && agents.has(w.agentId)); }
+function queueMeta() { return { on: queue.on, limit: queue.limit, running: queueRunning().length, workers: [...queue.workers.entries()].map(([issueId, w]) => ({ issueId, agentId: w.agentId, name: w.name, dept: w.dept, branch: w.branch, done: !!w.done, startedAt: w.startedAt })).slice(-20) }; }
+async function eligibleIssues() {
+  const [readyOut, listOut] = await Promise.all([bd(['ready', '--json']), bd(['list', '--status', 'open', '--json'])]);
+  let ready = [], open = []; try { ready = JSON.parse(readyOut) || []; } catch { /* empty */ } try { open = JSON.parse(listOut) || []; } catch { /* empty */ }
+  const byId = new Map(open.map((i) => [i.id, i]));
+  return ready.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }))
+    .filter((i) => i.status === 'open' && !i.assignee && !(i.labels || []).includes('hold') && !/^(epic|convoy|event)$/.test(i.issue_type || '') && !queue.workers.has(i.id))
+    .filter((i) => !(queue.skipped.get(i.id) > Date.now()))
+    .sort((p, q) => (p.priority ?? 2) - (q.priority ?? 2) || String(p.created_at).localeCompare(String(q.created_at)));
+}
+async function dispatchQueue() {
+  if (!queue.on || !beadsOk || !upstream.privileged || queue.busy || queueRunning().length >= queue.limit) return;
+  queue.busy = true;
+  try {
+    const next = (await eligibleIssues())[0]; if (!next) return;
+    try { await dispatchIssue(next); }
+    catch (e) {
+      queue.skipped.set(next.id, Date.now() + 10 * 60000); // don't hammer a task that won't start
+      const message = `Couldn't start ${next.id}: ${e.message}. I'll leave it for ten minutes.`;
+      console.log('[queue]', message); logChat('manager', 'floor manager', message, { ok: false }); fx('managerSay', null, { text: next.title, message, ok: false, action: 'answer', pending: false });
+    }
+  } finally { queue.busy = false; }
+}
+async function dispatchIssue(issue) {
+  const dept = classifyText(`${issue.title} ${issue.description || ''}`) || 'engineering';
+  const { dir, branch } = await makeWorktree(issue.id);
+  const a = await launchSpecialist(dept, dir);
+  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false };
+  queue.workers.set(issue.id, w); markDirty();
+  await bd(['update', issue.id, '--assignee', agentName(a), '--status', 'in_progress']).catch(() => {});
+  await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}), working in ${dir} on branch ${branch}.`]).catch(() => {});
+  const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\nYou are working in your own git worktree (${dir}) on branch ${branch}. Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
+  const skill = skillFor(dept, `${issue.title} ${issue.description || ''}`, { defaultOk: false }); // queued issues only run a skill they name
+  await typeInto(a.id, withSkill(prompt, skill) + HANDOFF_RULE);
+  if (skill) logEvent(a, 'tool', `running /${skill}`);
+  pendingReplies.set(a.id, { text: `queue: ${issue.title}`, t: Date.now(), issueId: issue.id, hops: 0, skill, queued: true });
+  refreshIssues();
+  const message = `Queue: ${agentName(a)} (${DEPT_NAMES[dept]}${skill ? `, running /${skill}` : ''}) picked up ${issue.id} "${issue.title}" in a worktree on ${branch}.`;
+  logChat('manager', 'floor manager', message, { ok: true, action: 'queue' });
+  fx('managerSay', a.id, { text: `${issue.id}: ${issue.title}`, message, ok: true, action: 'queue', pending: false });
+}
+if (beadsOk) setInterval(dispatchQueue, 15000);
+function parseQueue(text) {
+  const t = text.trim(); let m;
+  if ((m = t.match(/^queue\s*[:\-]\s*(.+)$/i)) || (m = t.match(/^(?:add|put)\s+(.+?)\s+(?:to|on|in)\s+(?:the\s+)?queue$/i))) return { kind: 'add', title: m[1].trim() };
+  if (/^queue\s+(?:on|start|resume|go|run)$/i.test(t)) return { kind: 'on' };
+  if (/^queue\s+(?:off|pause|stop|hold)$/i.test(t)) return { kind: 'off' };
+  if ((m = t.match(/^(?:queue\s+limit|workers?\s+at\s+once|max\s+workers?)\s*[:=]?\s*(\d+)$/i)) || (m = t.match(/^(\d+)\s+workers?\s+at\s+once$/i))) return { kind: 'limit', n: Number(m[1]) };
+  if (/^(?:queue(?:\s+status)?|what(?:'s| is) (?:queued|in the queue|on the queue))\??$/i.test(t)) return { kind: 'status' };
+  if (/^queue\s+(?:next|now)$/i.test(t)) return { kind: 'next' };
+  return null;
+}
+async function queueHandle(q) {
+  const result = { ok: true, action: 'answer', targetId: null, message: '' };
+  if (!beadsOk) { result.ok = false; result.message = 'There is no beads database in this folder, so there is no queue. Run `bd init` here first.'; return { result, deliver: null }; }
+  if (q.kind === 'add') {
+    try {
+      const out = await bd(['create', '--title', q.title.slice(0, 120), '--description', `Queued from the Agent Office chat.\n\n${q.title}`, '--type', 'task', '--priority', '2', '--labels', 'queue', '--json']);
+      const id = JSON.parse(out).id; refreshIssues(); setTimeout(dispatchQueue, 500);
+      result.message = `Queued as ${id}. ${queue.on ? `Next free slot takes it (${queueRunning().length}/${queue.limit} running).` : 'The queue is paused: say "queue on".'}`;
+    } catch (e) { result.ok = false; result.message = `Couldn't queue that: ${e.message}`; }
+    return { result, deliver: null };
+  }
+  if (q.kind === 'on') { queue.on = true; markDirty(); setTimeout(dispatchQueue, 300); result.message = `Queue is on: up to ${queue.limit} at once.`; return { result, deliver: null }; }
+  if (q.kind === 'off') { queue.on = false; markDirty(); result.message = 'Queue paused. Running workers finish what they have.'; return { result, deliver: null }; }
+  if (q.kind === 'limit') { queue.limit = Math.min(8, Math.max(0, q.n)); markDirty(); setTimeout(dispatchQueue, 300); result.message = `Up to ${queue.limit} queue worker${queue.limit === 1 ? '' : 's'} at once.`; return { result, deliver: null }; }
+  if (q.kind === 'next') { if (!queue.on) queue.on = true; setTimeout(dispatchQueue, 100); result.message = 'Looking for the next ready task…'; return { result, deliver: null }; }
+  const running = queueRunning(); let eligible = [];
+  try { eligible = await eligibleIssues(); } catch { /* bd down */ }
+  result.message = `Queue ${queue.on ? 'on' : 'paused'} · ${running.length}/${queue.limit} running` +
+    (running.length ? `\n` + running.map((w) => `◐ ${[...queue.workers.entries()].find(([, x]) => x === w)[0]} ${w.name} (${DEPT_NAMES[w.dept]}) on ${w.branch}`).join('\n') : '') +
+    (eligible.length ? `\nWaiting: ` + eligible.slice(0, 6).map((i) => `${i.id} P${i.priority ?? 2} ${i.title}`).join('; ') + (eligible.length > 6 ? ` …+${eligible.length - 6}` : '') : '\nNothing waiting.');
+  return { result, deliver: null };
+}
 const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
 async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0 } = {}) {
   const skill = skillFor(a.dept, prompt);
@@ -708,6 +809,7 @@ async function managerHandle(text) {
   const playReq = parsePlay(text);
   if (playReq) return playHandle(playReq);
   const result = { ok: false, action: null, targetId: null, message: '' };
+  const q = parseQueue(text); if (q) return queueHandle(q);
   const rename = parseRename(text);
   if (rename) {
     const a = findAgent(rename.name);

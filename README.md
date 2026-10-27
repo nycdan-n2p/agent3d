@@ -53,9 +53,11 @@ The skills installed on this Mac are attached to the job that does that work, an
 | QA | `/replay-qa-loop` (default), `/code-review` |
 | Engineering | `/codebase-memory`, `/simplify`, `/graphify` (only when the task asks for them) |
 
-## The task board
+## The task board and the queue
 
-If the folder has a Beads database (`bd init`), the floor manager files an issue for every task he hands out: the agent is the assignee, the request is the description, and the issue sits in progress until the agent's report comes back, which the agent appends as a note before closing it. If the agent ends with a question the issue stays open with the note attached. Open issues are drawn on the task board on the left wall, `tasks` in the chat lists them, and each report in the inbox names its issue. Agents launched in a Beads-enabled folder also get `bd prime` through the repo hooks, so they track their own sub-tasks there too.
+If the folder has a Beads database (`bd init`), the floor manager files an issue for every task he hands out: the agent is the assignee, the request is the description, and the issue sits in progress until the agent's report comes back, which the agent appends as a note before closing it. If the agent ends with a question the issue stays open with the note attached. Open issues are drawn on the task board on the left wall, `tasks` in the chat lists them, and each report in the inbox names its issue.
+
+The board is also a queue. Say `queue on` and the manager works through it by himself: any open issue with no assignee and no open blocker is eligible (label one `hold` to keep it back), highest priority first. For each he hires a fresh specialist whose job matches the issue, in that issue's own git worktree of this project (`.worktrees/<id>` on branch `office/<id>`), hands over the task with the rule to commit on that branch and never push, and the report closes the issue. At most two run at once (`queue limit 3`, or `OFFICE_WORKERS=3` at start); agents you hire yourself don't count. `queue: <task>` files a new issue straight onto the queue, `queue` shows what is running and waiting, `queue next` dispatches one right away, and `queue off` pauses it while running workers finish. The queue starts paused unless the bridge is started with `OFFICE_QUEUE=on`. Queued workers only run a skill the issue names; a worktree worker's report says which branch holds its commits, and the worktrees stay until you remove them (`git worktree remove .worktrees/<id>`).
 
 ## Playtime
 

@@ -212,16 +212,17 @@ function rank(w) { return w === 'permission' ? 0 : w === 'question' ? 1 : w === 
 const taskCanvas = document.createElement('canvas'); taskCanvas.width = 1100; taskCanvas.height = 560;
 const taskTex = new THREE.CanvasTexture(taskCanvas); taskTex.colorSpace = THREE.SRGBColorSpace;
 const taskMaterial = new THREE.MeshStandardMaterial({ map: taskTex, emissiveMap: taskTex, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.4 });
-let lastIssues = []; let beadsOn = false; let taskSig = ''; let deptSkills = {};
+let lastIssues = []; let beadsOn = false; let taskSig = ''; let deptSkills = {}; let lastQueue = null;
 const PRIO_COLORS = ['#ff4d6d', '#ffb020', '#4ea1ff', '#8b92b8', '#5c6390'];
 function drawTaskBoard(force = false) {
-  const sig = JSON.stringify([beadsOn, lastIssues]); if (!force && sig === taskSig) return; taskSig = sig;
+  const sig = JSON.stringify([beadsOn, lastIssues, lastQueue]); if (!force && sig === taskSig) return; taskSig = sig;
   const c = taskCanvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
   ctx.fillStyle = '#0b0a14'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#ffb020'; ctx.fillRect(0, 0, W, 6);
   ctx.font = `bold 26px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.fillText('TASK BOARD', 28, 22);
   ctx.font = `18px ${mono}`; ctx.fillStyle = '#8b92b8'; ctx.textAlign = 'right';
-  ctx.fillText(beadsOn ? `${lastIssues.length} open · beads` : 'no beads database here', W - 28, 26); ctx.textAlign = 'left';
+  const q = lastQueue; const qText = q ? (q.on ? `queue on · ${q.running}/${q.limit} running` : 'queue paused') : '';
+  ctx.fillText(beadsOn ? `${lastIssues.length} open · ${qText}` : 'no beads database here', W - 28, 26); ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(28, 62, W - 56, 2);
   if (!lastIssues.length) { ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(beadsOn ? 'board is clear' : 'run `bd init` in the project folder', 28, 84); }
   lastIssues.slice(0, 12).forEach((i, k) => {
@@ -231,7 +232,8 @@ function drawTaskBoard(force = false) {
     ctx.fillStyle = i.status === 'in_progress' ? '#39d98a' : '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(i.status === 'in_progress' ? '◐' : '○', 82, y + 8);
     ctx.fillStyle = '#8b92b8'; ctx.font = `16px ${mono}`; ctx.fillText(i.id.slice(-8), 110, y + 11);
     ctx.fillStyle = '#e8ecff'; ctx.font = `19px ${mono}`; ctx.fillText(i.title.slice(0, 60) + (i.title.length > 60 ? '…' : ''), 215, y + 9);
-    if (i.assignee) { ctx.fillStyle = '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText(i.assignee.slice(0, 14), W - 28, y + 12); ctx.textAlign = 'left'; }
+    const qw = lastQueue?.workers?.find((w) => w.issueId === i.id && !w.done);
+    if (i.assignee) { ctx.fillStyle = qw ? '#39d98a' : '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText((qw ? '🌿 ' : '') + i.assignee.slice(0, 14), W - 28, y + 12); ctx.textAlign = 'left'; }
   });
   if (lastIssues.length > 12) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${lastIssues.length - 12} more`, 28, 80 + 12 * 39); }
   taskTex.needsUpdate = true;
@@ -357,14 +359,16 @@ function instanced(geo, cap) {
 const brickIM = instanced(new THREE.BoxGeometry(1, 1, 1), 2200), roundIM = instanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 20), 2200);
 const slopeIM = instanced(wedgeGeo(), 2200), studIM = instanced(STUD_GEO, 16000);
 studIM.castShadow = false;
+// Put away between games so the lounge floor stays clear; renderPlay brings it out.
+const playTable = new THREE.Group(); playTable.visible = false; scene.add(playTable);
 (function buildPlayTable() {
   const size = LEGO.N * LEGO.S, half = size / 2;
-  const top = new THREE.Mesh(new THREE.BoxGeometry(size + 0.5, 0.1, size + 0.5), mat(0xd9b48f, { roughness: 0.5 })); top.position.set(LEGO.x, 0.38, LEGO.z); top.castShadow = true; top.receiveShadow = true; scene.add(top);
-  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.33, 0.12), mat(0x5a4330)); leg.position.set(LEGO.x + sx * (half + 0.1), 0.165, LEGO.z + sz * (half + 0.1)); scene.add(leg); }
-  const plate = new THREE.Mesh(new THREE.BoxGeometry(size, 0.04, size), mat(0x237841, { roughness: 0.45 })); plate.position.set(LEGO.x, 0.45, LEGO.z); plate.receiveShadow = true; scene.add(plate);
+  const top = new THREE.Mesh(new THREE.BoxGeometry(size + 0.5, 0.1, size + 0.5), mat(0xd9b48f, { roughness: 0.5 })); top.position.set(LEGO.x, 0.38, LEGO.z); top.castShadow = true; top.receiveShadow = true; playTable.add(top);
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.33, 0.12), mat(0x5a4330)); leg.position.set(LEGO.x + sx * (half + 0.1), 0.165, LEGO.z + sz * (half + 0.1)); playTable.add(leg); }
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(size, 0.04, size), mat(0x237841, { roughness: 0.45 })); plate.position.set(LEGO.x, 0.45, LEGO.z); plate.receiveShadow = true; playTable.add(plate);
   const studs = new THREE.InstancedMesh(STUD_GEO, mat(0x2a8a4c, { roughness: 0.45 }), LEGO.N * LEGO.N); const m = new THREE.Matrix4(); let i = 0;
   for (let x = 0; x < LEGO.N; x++) for (let z = 0; z < LEGO.N; z++) { const [wx, , wz] = legoWorld(x + 0.5, 0, z + 0.5); m.makeTranslation(wx, LEGO.top + 0.0175, wz); studs.setMatrixAt(i++, m); }
-  studs.receiveShadow = true; scene.add(studs);
+  studs.receiveShadow = true; playTable.add(studs);
 })();
 const legoSign = textSprite('LEGO', { size: 46, color: '#fff', bg: 'rgba(35,120,65,0.85)' }); legoSign.position.set(LEGO.x, 3.3, LEGO.z); legoSign.scale.set(4.2, 0.66, 1); legoSign.visible = false; scene.add(legoSign);
 function legoWorld(x, y, z) { return [LEGO.x + (x - LEGO.N / 2) * LEGO.S, LEGO.top + y * LEGO.H, LEGO.z + (z - LEGO.N / 2) * LEGO.S]; }
@@ -866,7 +870,7 @@ function addReportRow(r, fresh) {
   const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id;
   const body = mdLite(r.text) || mdLite(r.recap) || '(no text in this turn)';
   el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b><span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
-    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>`;
+    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>`;
   el.onclick = () => { el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
   rList.prepend(el); while (rList.children.length > 100) rList.lastChild.remove();
   if (fresh) unread++; renderBadge();
@@ -1025,7 +1029,7 @@ let playSig = '';
 function renderPlay() {
   const p = lastPlay;
   const has = !!(p && (p.active || p.brickCount));
-  playPanel.classList.toggle('show', has); legoSign.visible = has;
+  playPanel.classList.toggle('show', has); legoSign.visible = has; playTable.visible = has;
   $('#btnPlay').classList.toggle('on', !!p?.active); $('#btnPlay').textContent = p?.active ? '🧱 stop' : '🧱 play';
   if (!has) return;
   const left = Math.max(0, p.endsAt - Date.now());
@@ -1075,7 +1079,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 // ============================================================ data feed
 const avatars = new Map(); let lastAgents = []; let connected = false; let lastPlay = null;
 function applyState(s) {
-  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null; lastIssues = s.issues || []; beadsOn = !!s.beads; drawTaskBoard();
+  lastAgents = s.agents; connected = s.upstream.connected; lastPlay = s.play || null; lastIssues = s.issues || []; beadsOn = !!s.beads; lastQueue = s.queue || null; drawTaskBoard();
   dot.classList.toggle('on', connected);
   meta.textContent = connected ? `${s.agents.length} agent${s.agents.length === 1 ? '' : 's'} · pixel-agents :${s.upstream.port}` : (s.upstream.port ? `reconnecting to :${s.upstream.port}…` : 'no pixel-agents server found');
   const seen = new Set();
@@ -1111,6 +1115,7 @@ function applyFx(f) {
     logChat({ who: 'you', name: 'you', text: f.text }); logChat({ who: 'manager', name: 'floor manager', text: f.message, ok: f.ok });
     manager.task = { targetId: f.id, pendingTarget: null, text: f.action === 'move' ? f.message : f.text, phase: 'walk', until: 0, pending: !!f.pending };
     if (f.action === 'answer') { manager.task = null; manager.say(f.message.split('\n')[0], { ms: 8000 }); manager.jumpV = 1.6; }
+    else if (f.action === 'queue') { if (avatars.has(f.id)) manager.walkTo(f.id); else manager.task = null; manager.say(f.message.replace(/^Queue: /, ''), { ms: 9000 }); }
     else if (f.id !== null && f.id !== undefined && avatars.has(f.id)) manager.walkTo(f.id);
     else if (f.action === 'launch' || f.action === 'handoff') { manager.say(f.message.split('\n')[0], { ms: 20000 }); }
     else if (f.action === 'play' && f.ok) manager.walkToTable();

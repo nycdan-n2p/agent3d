@@ -7,3 +7,4 @@
 *.gate.lock*
 reports.jsonl
 names.json
+.worktrees/
