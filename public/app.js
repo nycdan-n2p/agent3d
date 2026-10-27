@@ -428,7 +428,7 @@ function textSprite(text, { size = 48, color = '#fff', bg = 'rgba(0,0,0,0.55)', 
   ctx.fillStyle = bg; roundRect(ctx, 512 - w / 2, 20, w, 120, 30); ctx.fill();
   ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 512, 82, 960);
   const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true, depthWrite: false })); // depth-tested so labels don't show through floors
   sp.scale.set(3.2, 0.5, 1); sp.renderOrder = 10; sp.userData.canvas = c; return sp;
 }
 function updateSprite(sp, text, opts = {}) {
@@ -653,12 +653,15 @@ class Avatar {
     this.bubble = textSprite('!', { size: 90, color: '#fff', bg: 'rgba(255,77,109,0.95)' }); this.bubble.position.set(0.55, 2.3, 0); this.bubble.scale.set(0.8, 0.5, 1); this.bubble.visible = false; this.group.add(this.bubble);
     this.speech = textSprite('', { size: 38, color: '#111', bg: 'rgba(255,255,255,0.95)' }); this.speech.position.y = 3.0; this.speech.scale.set(4.4, 0.6, 1); this.speech.visible = false; this.group.add(this.speech); this.speechUntil = 0; this.lastBuild = 0;
     // context bar
-    this.barBg = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.08), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthTest: false }));
-    this.bar = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.06), new THREE.MeshBasicMaterial({ color: 0x39d98a, depthTest: false }));
+    this.barBg = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.08), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthWrite: false }));
+    this.bar = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.06), new THREE.MeshBasicMaterial({ color: 0x39d98a, depthWrite: false }));
     this.barHolder = new THREE.Group(); this.barHolder.position.y = 1.98; this.barHolder.add(this.barBg, this.bar); this.bar.position.z = 0.001; this.bar.renderOrder = 11; this.barBg.renderOrder = 11; this.group.add(this.barHolder);
     // glow ring on the floor
     this.ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.52, 32), new THREE.MeshBasicMaterial({ color: this.color, transparent: true, opacity: 0.0, side: THREE.DoubleSide }));
     this.ring.rotation.x = -Math.PI / 2; this.ring.position.y = 0.02; this.group.add(this.ring);
+    // generous invisible hitbox so a click lands even while the character jumps or waves
+    this.hitbox = new THREE.Mesh(new THREE.BoxGeometry(1.3, 3.2, 1.3), new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }));
+    this.hitbox.position.y = 1.6; this.hitbox.renderOrder = -1; this.group.add(this.hitbox);
     // the report an agent carries to the office when its turn is done
     this.paper = new THREE.Group();
     const sheet = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.44, 0.02), mat(0xf4f1e8)); this.paper.add(sheet);
@@ -758,13 +761,22 @@ class Avatar {
     this.head.rotation.x = this.mode === 'play' && !moving ? 0.35 : typing ? 0.12 + Math.sin(this.t * 1.7) * 0.05 : (w === 'work' ? Math.sin(this.t * 0.9) * 0.15 : this.mode === 'huddle' && !moving ? Math.max(0, Math.sin(this.t * 2.2 + this.id)) * 0.18 : 0);
     this.head.rotation.y = w === 'work' && !typing ? Math.sin(this.t * 0.7) * 0.35 : 0;
     this.mouth.scale.y = needsYou ? 2.5 : 1;
+    if (godVoice) { // the voice of god: everyone freezes, looks up to the heavens and trembles
+      const k = godVoice.listening ? 0.6 : 1; // a little less violent while you are still talking
+      this.head.rotation.x = -0.8 + Math.sin(this.t * 37) * 0.04 * k; this.head.rotation.y = Math.sin(this.t * 29 + this.id) * 0.05 * k;
+      this.group.position.x += Math.sin(this.t * 53 + this.id) * 0.03 * k; this.group.position.z += Math.cos(this.t * 47 + this.id * 2) * 0.03 * k;
+      this.body.position.y += Math.sin(this.t * 41) * 0.012 * k;
+      this.arms[0].rotation.x = -0.5 + Math.sin(this.t * 31) * 0.12; this.arms[1].rotation.x = -0.5 - Math.sin(this.t * 31) * 0.12; this.arms[0].rotation.z = 0.5; this.arms[1].rotation.z = -0.5; // arms clutched in
+      this.mouth.scale.y = 3; this.mouth.scale.x = 0.6;
+    } else this.mouth.scale.x = 1;
     // jump / bounce for permission
     if (needsYou && !moving && this.jumpY <= 0 && Math.random() < dt * (w === 'permission' ? 2.5 : 1.2)) this.jumpV = w === 'permission' ? 3.0 : 2.2;
     this.jumpV -= 9.8 * dt; this.jumpY = Math.max(0, this.jumpY + this.jumpV * dt); if (this.jumpY === 0 && this.jumpV < 0) this.jumpV = 0;
     // --- labels + bubble
     updateSprite(this.nameSprite, a.role === 'planner' ? `${this.name()} · planner` : this.name(), { size: 44, color: a.role === 'planner' ? '#ffb020' : '#e8ecff', bg: 'rgba(12,14,30,0.75)' });
     let status = ''; let statusColor = '#39d98a';
-    if ((w === 'permission' || w === 'question') && a.desk && a.ask?.kind === 'permission') { status = `security desk: ${a.desk.name}`; statusColor = '#ffb020'; }
+    if (godVoice) { status = godVoice.listening ? '…he speaks' : 'trembling'; statusColor = '#fff4d6'; }
+    else if ((w === 'permission' || w === 'question') && a.desk && a.ask?.kind === 'permission') { status = `security desk: ${a.desk.name}`; statusColor = '#ffb020'; }
     else if (w === 'permission' || w === 'question') { status = a.ask?.kind === 'question' ? a.ask.question.slice(0, 40) : a.ask?.kind === 'permission' ? `may I run ${prettyTool(a.ask.tool)}?` : 'needs your approval'; statusColor = '#ff4d6d'; }
     else if (typing && this.mode === 'play') { const t = tools[tools.length - 1]; const lm = /lego\.mjs"?\s+\d+\s+(\w+)/.exec(t.status || ''); status = LEGO_ACTIONS[lm?.[1]] || 'playing'; statusColor = '#39d98a'; }
     else if (typing) { const t = tools[tools.length - 1]; status = (t.status || t.toolName).replace(/mcp__\S+/g, (m) => prettyTool(m)).slice(0, 36); statusColor = '#' + new THREE.Color(TOOL_COLORS[toolKind(t.toolName)]).getHexString(); }
@@ -902,6 +914,7 @@ class Manager {
     this.body.position.y = moving ? Math.abs(Math.sin(this.t * 11)) * 0.06 : 0;
     this.head.rotation.y = talking ? Math.sin(this.t * 3) * 0.15 : (moving ? 0 : Math.sin(this.t * 0.6) * 0.4);
     this.mouth.scale.y = talking ? 1.5 + Math.sin(this.t * 14) : 1;
+    if (godVoice) { this.head.rotation.x = -0.7 + Math.sin(this.t * 33) * 0.03; this.head.rotation.y = 0; this.group.position.x += Math.sin(this.t * 51) * 0.02; this.group.position.z += Math.cos(this.t * 43) * 0.02; this.mouth.scale.y = 2.5; }
     if (this.bubble.visible && now > this.bubbleUntil) this.bubble.visible = false;
   }
 }
@@ -1015,8 +1028,8 @@ function addReportRow(r, fresh) {
   const el = document.createElement('div'); el.className = 'rep' + (fresh ? ' unread' : ''); el.dataset.id = r.id;
   const body = mdLite(r.text) || mdLite(r.recap) || '(no text in this turn)';
   el.innerHTML = `<div class="rt"><span class="chip" style="background:${deptHex(r.dept)}">${escapeHtml(deptOf(r.dept).name)}</span><b>${escapeHtml(r.name)}</b><span class="ago" data-t="${r.t}">${ago(r.t)} ago</span></div>
-    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>`;
-  el.onclick = () => { el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
+    ${r.prompt ? `<div class="rp">↳ ${escapeHtml(r.prompt)}</div>` : ''}${r.issueId ? `<div class="rp">🧵 ${escapeHtml(r.issueId)}${r.asked ? ' · still open' : ' · closed'}${r.branch ? ` · 🌿 ${escapeHtml(r.branch)}` : ''}</div>` : ''}${r.asked ? '<div class="rq">❓ ended with a question for you</div>' : ''}<div class="rb">${escapeHtml(body)}</div>${(r.questions || []).length ? `<button type="button" class="ra">📝 answer ${r.questions.length === 1 ? 'the question' : `all ${r.questions.length} questions`}</button>` : ''}`;
+  el.onclick = (e) => { if (e.target.classList.contains('ra')) { e.stopPropagation(); openBriefForReport(r); return; } el.classList.toggle('open'); if (el.classList.contains('unread')) { el.classList.remove('unread'); unread = Math.max(0, unread - 1); renderBadge(); } };
   rList.prepend(el); while (rList.children.length > 100) rList.lastChild.remove();
   if (fresh) unread++; renderBadge();
 }
@@ -1030,7 +1043,65 @@ function handInReport(r, av, walked) {
   if (r.replyTo) logChat({ who: 'agent', name: r.name, dept: r.dept, text: r.text || r.recap });
   else logChat({ who: 'manager', name: 'floor manager', text: `${r.name} filed a ${deptOf(r.dept).name} report${r.asked ? ' and is waiting on your answer' : ''}. Say "what did ${r.name} say" or open 📋 reports.` }, { show: false });
   pushFeed('report', r.name, `filed a ${deptOf(r.dept).name} report`); drawBoard(lastAgents); chime();
+  if ((r.questions || []).length >= 2 && !briefPanel.classList.contains('show')) openBriefForReport(r);
 }
+// ---------- the brief: a big form when an agent asks a lot at once ----------
+// The whole reply on the left, one field per question on the right; every answer goes back to the
+// agent's terminal as a single message (or, for an AskUserQuestion form, as one pick per question).
+const briefPanel = $('#brief'), bForm = $('#bForm'), bText = $('#bText'), bHint = $('#bHint'), bSend = $('#bSend');
+let brief = null; // { agentId, name, kind: 'text' | 'form', questions, ask }
+function agentData(id) { return lastAgents.find((a) => a.id === id) || avatars.get(id)?.data || null; }
+function openBriefForReport(r) {
+  const a = agentData(r.agentId);
+  openBrief({ agentId: r.agentId, name: r.name, dept: r.dept, hasTerminal: !!a?.hasTerminal, kind: 'text', text: r.text || r.recap || '', prompt: r.prompt, questions: r.questions || [] });
+}
+function openBriefForAsk(a, name) {
+  const qs = a.ask?.questions || (a.ask ? [a.ask] : []);
+  const text = (a.ask.recap ? a.ask.recap + '\n\n' : '') + qs.map((q, i) => `${i + 1}. ${q.header ? `[${q.header}] ` : ''}${q.question}` + (q.options.length ? '\n' + q.options.map((o, j) => `   ${j + 1}) ${o.label}${o.description ? ' — ' + o.description : ''}`).join('\n') : '')).join('\n\n');
+  openBrief({ agentId: a.id, name, dept: a.dept, hasTerminal: !!a.hasTerminal, kind: 'form', text, prompt: a.prompt, questions: qs });
+}
+function openBrief(b) {
+  brief = b; const d = deptOf(b.dept);
+  $('#bChip').textContent = d.name; $('#bChip').style.background = deptHex(b.dept);
+  $('#bTitle').textContent = `${b.name} needs ${b.questions.length === 1 ? 'an answer' : `${b.questions.length} answers`}`;
+  $('#bMeta').textContent = b.hasTerminal ? '' : 'desktop session: copy your answers into that window';
+  bText.innerHTML = `<div class="lbl">what ${escapeHtml(b.name)} wrote${b.prompt ? ` · about: ${escapeHtml(b.prompt.slice(0, 80))}` : ''}</div>${escapeHtml(mdLite(b.text))}`;
+  const fields = b.questions.map((q, i) => {
+    if (b.kind === 'form') {
+      const opts = q.options.map((o, j) => `<button type="button" data-q="${i}" data-opt="${j + 1}" title="${escapeHtml(o.description)}"><b>${j + 1}</b> ${escapeHtml(o.label)}</button>`).join('');
+      return `<div class="q" data-q="${i}">${q.header ? `<div class="qh">${escapeHtml(q.header)}</div>` : ''}<div class="qt"><b>${i + 1}.</b>${escapeHtml(q.question)}</div><div class="opts">${opts}</div><input type="text" data-q="${i}" placeholder="or type your own answer…" /></div>`;
+    }
+    return `<div class="q" data-q="${i}"><div class="qt"><b>${i + 1}.</b>${escapeHtml(q)}</div><textarea data-q="${i}" rows="2" placeholder="leave empty and ${escapeHtml(b.name)} uses the default"></textarea></div>`;
+  });
+  bForm.innerHTML = `<div class="lbl">your answers</div>${fields.join('')}${b.kind === 'text' ? `<div class="q"><div class="qt"><b>+</b>anything else</div><textarea data-q="extra" rows="2" placeholder="notes, material, constraints…"></textarea></div>` : ''}`;
+  for (const btn of bForm.querySelectorAll('button[data-opt]')) btn.onclick = () => { const q = bForm.querySelector(`.q[data-q="${btn.dataset.q}"]`); for (const x of q.querySelectorAll('button[data-opt]')) x.classList.toggle('sel', x === btn && !btn.classList.contains('sel')); q.querySelector('input').value = ''; };
+  for (const inp of bForm.querySelectorAll('input[type=text]')) inp.oninput = () => { if (inp.value) for (const x of inp.closest('.q').querySelectorAll('button[data-opt]')) x.classList.remove('sel'); };
+  bHint.textContent = b.kind === 'form' ? 'pick a button or type your own for each question · ⌘⏎ sends' : 'answer what you care about; the rest goes back as "your call" · ⌘⏎ sends';
+  bSend.disabled = !b.hasTerminal; briefPanel.classList.add('show'); $('#help').style.display = 'none';
+  const first = bForm.querySelector('textarea, input'); if (first) setTimeout(() => first.focus(), 50);
+}
+function closeBrief() { briefPanel.classList.remove('show'); brief = null; $('#help').style.display = ''; }
+async function sendBrief() {
+  if (!brief || !brief.hasTerminal) return;
+  bSend.disabled = true;
+  try {
+    if (brief.kind === 'form') {
+      const answers = brief.questions.map((q, i) => { const sel = bForm.querySelector(`button[data-q="${i}"].sel`); const text = bForm.querySelector(`input[data-q="${i}"]`).value.trim(); return text ? { text } : { option: sel ? Number(sel.dataset.opt) : 1 }; });
+      const r = await api(`/api/agents/${brief.agentId}/answers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
+      if (!r.ok) throw new Error((await r.json()).message || 'failed');
+    } else {
+      const lines = brief.questions.map((q, i) => { const v = bForm.querySelector(`textarea[data-q="${i}"]`).value.trim(); return `${i + 1}. ${v || 'your call, go with your default'}`; });
+      const extra = bForm.querySelector('textarea[data-q="extra"]').value.trim();
+      await sendToAgent(brief.agentId, `Answers to your questions:\n${lines.join('\n')}${extra ? `\n\nAlso: ${extra}` : ''}`, true);
+    }
+    toast(`answers sent to ${brief.name}`); logChat({ who: 'you', name: 'you', text: `answered ${brief.name}'s ${brief.questions.length} question${brief.questions.length === 1 ? '' : 's'}` }, { show: false });
+    const id = brief.agentId; closeBrief(); if (avatars.has(id)) { followId = id; renderRoster(lastAgents); }
+  } catch (e) { toast(`could not send: ${e.message}`); bSend.disabled = false; }
+}
+bSend.onclick = sendBrief; $('#bClose').onclick = closeBrief; $('#bLater').onclick = closeBrief;
+briefPanel.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendBrief(); } });
+briefPanel.onclick = (e) => { if (e.target === briefPanel) closeBrief(); };
+window.__officeBrief = (kind = 'text') => { const a = lastAgents[0]; if (!a) return 'no agent'; if (kind === 'form') openBriefForAsk({ ...a, ask: { kind: 'question', recap: 'Fake recap.', questions: [{ question: 'Which style?', header: 'Style', options: [{ label: 'Watercolor', description: 'soft' }, { label: 'Ukiyo-e', description: 'woodblock' }] }, { question: 'Length?', header: 'Length', options: [{ label: '30s', description: '' }, { label: '60s', description: '' }] }] } }, 'Vera'); else openBriefForReport({ agentId: a.id, name: 'Vera', dept: 'uiux', prompt: 'promo video for the office', text: 'Before I start, a few things:\n\n1. Which product is the promo for? Default: the office itself.\n2. Which style? (default: Watercolor Brush)\n3. Do you have a logo or brand font?\n4. Should I render at 1080p?', questions: ['Which product is the promo for? Default: the office itself.', 'Which style? (default: Watercolor Brush)', 'Do you have a logo or brand font?', 'Should I render at 1080p?'] }); return 'ok'; }; // debug hook
 async function loadHistory() {
   try {
     const h = await (await api('/api/history')).json();
@@ -1149,7 +1220,7 @@ function renderDetail() {
     if (a.ask.kind === 'question') {
       askHtml = `<div class="ask"><div class="askTitle">❓ ${escapeHtml(av.name())} asks:</div><div class="askQ">${escapeHtml(a.ask.question)}</div>
         <div class="askOpts">${a.ask.options.map((o, i) => `<button type="button" data-answer="${i + 1}" title="${escapeHtml(o.description)}"><b>${i + 1}</b> ${escapeHtml(o.label)}</button>`).join('')}
-        <button type="button" data-answer="other">✎ other…</button></div></div>`;
+        <button type="button" data-answer="other">✎ other…</button></div>${(a.ask.questions || []).length > 1 ? `<button type="button" class="askAll">📝 answer all ${a.ask.questions.length} questions</button>` : ''}</div>`;
     } else {
       askHtml = `<div class="ask perm"><div class="askTitle">⚠ ${escapeHtml(av.name())} wants to run <b>${escapeHtml(prettyTool(a.ask.tool))}</b></div>
         ${a.desk ? `<div class="askQ" style="color:#ffb020">🛡 at the security desk: ${escapeHtml(a.desk.name)} is checking it against the office policy. You can still answer yourself.</div>` : ''}
@@ -1177,6 +1248,7 @@ function renderDetail() {
   if (dScreen.dataset.key === key) return;
   dScreen.dataset.key = key; dScreen.innerHTML = html;
   for (const sp of dScreen.querySelectorAll('.t[data-t]')) sp.textContent = `${ago(Number(sp.dataset.t))} ago`;
+  const all = dScreen.querySelector('.askAll'); if (all) all.onclick = () => openBriefForAsk(a, av.name());
   const sel = dScreen.querySelector('.deptSel'); if (sel) sel.onchange = () => api(`/api/agents/${a.id}/dept`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dept: sel.value }) }).catch(() => toast('could not move them'));
   for (const b of dScreen.querySelectorAll('button[data-answer]')) b.onclick = () => {
     const v = b.dataset.answer;
@@ -1220,7 +1292,7 @@ $('#btnNight').onclick = (e) => { nightTarget = nightTarget ? 0 : 1; e.target.te
 $('#btnNight').classList.add('on');
 $('#btnReset').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(HOME); controls.target.copy(HOME_TARGET); renderRoster(lastAgents); };
 $('#btnOverview').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(OVERVIEW); controls.target.copy(OVERVIEW_TARGET); renderRoster(lastAgents); };
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { endReveal(); endBoardZoom(); followId = null; renderRoster(lastAgents); } });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (briefPanel.classList.contains('show')) { closeBrief(); return; } endReveal(); endBoardZoom(); followId = null; renderRoster(lastAgents); } });
 // click to follow
 const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
@@ -1232,6 +1304,7 @@ renderer.domElement.addEventListener('pointermove', (e) => {
 });
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
+  scene.updateMatrixWorld(); // characters move every frame; pick against where they are now
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera);
   if (yourScreen) { // a row on your desk screen jumps to that agent, with its answer buttons open
     const h = ray.intersectObject(yourScreen.mesh)[0];
@@ -1244,7 +1317,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   if (binHit && (!hit || binHit.distance < hit.distance)) { reportsPanel.classList.contains('show') ? closeReports() : openReports(); return; }
   const boardHit = ray.intersectObjects(boards.map((b) => b.mesh))[0];
   if (boardHit && (!hit || boardHit.distance < hit.distance)) { const b = boards.find((x) => x.mesh === boardHit.object); boardZoom?.board === b ? endBoardZoom() : startBoardZoom(b); return; } // click again to step back
-  if (hit) { let o = hit.object; while (o && o.userData.avatarId === undefined) o = o.parent; followId = followId === o.userData.avatarId ? null : o.userData.avatarId; renderRoster(lastAgents); }
+  if (hit) { let o = hit.object; while (o && o.userData.avatarId === undefined) o = o.parent; endReveal(); endBoardZoom(); followId = followId === o.userData.avatarId ? null : o.userData.avatarId; renderRoster(lastAgents); renderDetail(); }
 });
 
 // ============================================================ data feed
@@ -1271,6 +1344,9 @@ function applyState(s) {
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
 window.__officeFake = (id, kind) => { const av = avatars.get(id); if (!av) return 'no agent'; av.data.permission = kind === 'permission'; av.data.awaitingInput = kind === 'question'; av.data.ask = kind === 'question' ? { kind: 'question', question: 'Fake: which option should I take for the fake test?' } : kind === 'permission' ? { kind: 'permission', tool: 'Bash', summary: 'rm -rf build' } : null; av.decide(); drawYourScreen(true); return 'ok'; }; // debug hook
 window.__officeRowPixel = (i) => { const r = yourScreen?.rows[i]; if (!r) return null; const c = yourScreen.canvas; const v = 1 - ((r.y0 + r.y1) / 2) / c.height; const p = new THREE.Vector3(0, (v - 0.5) * 0.7, 0); yourScreen.mesh.localToWorld(p).project(camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight]; }; // debug hook
+window.__officePick = (x, y, id) => { mouse.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera); const av = ray.intersectObjects([...avatars.values()].map((a) => a.group), true)[0]; const one = id !== undefined && avatars.get(id) ? ray.intersectObject(avatars.get(id).group, true).length : -1; const wp = id !== undefined && avatars.get(id) ? avatars.get(id).group.getWorldPosition(new THREE.Vector3()).toArray().map((v) => +v.toFixed(2)) : null; return { one, wp, origin: ray.ray.origin.toArray().map((v) => +v.toFixed(2)), dir: ray.ray.direction.toArray().map((v) => +v.toFixed(3)), near: ray.near, far: ray.far, layers: ray.layers.mask, size: [innerWidth, innerHeight, renderer.domElement.clientWidth, renderer.domElement.clientHeight], yourScreen: !!(yourScreen && ray.intersectObject(yourScreen.mesh)[0]), tray: !!(trayHit && ray.intersectObject(trayHit).length), avatar: av ? { dist: +av.distance.toFixed(2), obj: av.object.type, geom: av.object.geometry?.type } : null, bin: !!ray.intersectObjects(binParts, true)[0], board: !!ray.intersectObjects(boards.map((b) => b.mesh))[0] }; }; // debug hook
+window.__officeInternals = () => ({ THREE, camera, scene, avatars, ray, controls, renderer }); // debug hook
+window.__officeProject = (id) => { const av = avatars.get(id); if (!av) return null; const p = av.group.position.clone(); p.y += 1.2; p.project(camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight]; }; // debug hook: CSS pixel of an avatar's chest
 window.__officeCam = (p, t) => { endReveal(); followId = null; camera.position.set(...p); controls.target.set(...t); }; // debug hook: place the camera
 window.__officeDebug = () => ({ huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
@@ -1337,6 +1413,70 @@ $('#chat').onsubmit = (e) => {
   askManager(text);
 };
 $('#btnPlay').onclick = () => askManager(lastPlay?.active ? 'stop playing' : 'play');
+
+// ---------- the voice of god: you speak, the floor hears it from above ----------
+let godVoice = null; // { listening: bool, until: ms } while the office is trembling
+const godEl = $('#god'); const micBtn = $('#btnMic');
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition; let rec = null; let listening = false;
+function godStart(listeningNow, text) {
+  godVoice = { listening: listeningNow, until: Infinity };
+  godEl.textContent = text || '…'; godEl.classList.add('show');
+  micBtn.classList.toggle('listening', listeningNow); micBtn.classList.toggle('speaking', !listeningNow);
+  if (!listeningNow) rumble(); // thunder under his words
+}
+function godEnd() { godVoice = null; godEl.classList.remove('show'); micBtn.classList.remove('listening', 'speaking'); }
+function pickGodVoice() { // the deepest english voice the browser has
+  const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
+  const prefs = [/daniel/i, /google uk english male/i, /fred/i, /alex/i, /male/i, /^en-GB/i];
+  for (const re of prefs) { const v = vs.find((x) => re.test(x.name) || re.test(x.lang)); if (v) return v; }
+  return vs[0] || null;
+}
+let godTimer = 0;
+function voiceOfGod(text, { send = true } = {}) { // boom it out, hold the floor in awe, hand the words to the manager
+  if (!text) return;
+  clearTimeout(godTimer);
+  godStart(false, text);
+  if (send) askManager(text);
+  const fallbackMs = 1500 + text.length * 70;
+  if (!('speechSynthesis' in window)) { godTimer = setTimeout(godEnd, fallbackMs); return; }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.pitch = 0.35; u.rate = 0.78; u.volume = 1; const v = pickGodVoice(); if (v) u.voice = v;
+  let done = false; const finish = () => { if (done) return; done = true; clearTimeout(godTimer); godEnd(); };
+  u.onend = finish; u.onerror = finish;
+  godTimer = setTimeout(finish, fallbackMs * 2 + 4000); // some browsers never fire onend
+  speechSynthesis.speak(u);
+}
+function rumble() { // a low thunder bed while he speaks
+  if (!soundOn) return; actx ??= new (window.AudioContext || window.webkitAudioContext)();
+  const t0 = actx.currentTime; const o = actx.createOscillator(); const g = actx.createGain(); const lfo = actx.createOscillator(); const lg = actx.createGain();
+  o.type = 'sawtooth'; o.frequency.value = 38; lfo.frequency.value = 6; lg.gain.value = 10; lfo.connect(lg).connect(o.frequency);
+  g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.12, t0 + 0.4); g.gain.linearRampToValueAtTime(0.0001, t0 + 3.5);
+  o.connect(g).connect(actx.destination); o.start(t0); lfo.start(t0); o.stop(t0 + 3.6); lfo.stop(t0 + 3.6);
+}
+function stopListening() { listening = false; try { rec?.stop(); } catch {} }
+micBtn.onclick = () => {
+  if (listening) { stopListening(); return; }
+  if (!SpeechRec) { toast('this browser has no speech recognition — try Chrome or Safari'); return; }
+  rec = new SpeechRec(); rec.lang = navigator.language || 'en-US'; rec.interimResults = true; rec.continuous = false;
+  const input = $('#chatInput'); let finalText = '';
+  rec.onstart = () => { listening = true; godStart(true, 'listen…'); };
+  rec.onresult = (ev) => {
+    let interim = ''; for (let i = ev.resultIndex; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) finalText += r[0].transcript; else interim += r[0].transcript; }
+    const shown = (finalText + ' ' + interim).trim(); input.value = shown; godEl.textContent = shown || '…';
+  };
+  rec.onerror = (ev) => { listening = false; godEnd(); if (ev.error !== 'aborted' && ev.error !== 'no-speech') toast(`microphone: ${ev.error}`); else if (ev.error === 'no-speech') toast('heard nothing'); };
+  rec.onend = () => {
+    listening = false;
+    const text = (finalText || input.value).trim();
+    if (!text) { godEnd(); return; }
+    input.value = '';
+    voiceOfGod(text);
+  };
+  try { rec.start(); } catch (e) { toast('microphone unavailable'); godEnd(); }
+};
+window.__officeGod = (text, send = false) => { voiceOfGod(text || 'Finish the build. Then rest.', { send }); return 'ok'; }; // debug hook: no microphone needed
+
 async function askManager(text) {
   manager.say('On it!', { ms: 3000 }); manager.jumpV = 2.4;
   try { const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); if (!r.ok) toast('the floor manager is not answering'); }
@@ -1357,6 +1497,7 @@ const followTarget = new THREE.Vector3();
 function frame() {
   const dt = Math.min(0.2, clock.getDelta()); const now = Date.now(); // a slow frame still moves people the right distance
   applySky(dt);
+  if (godVoice) { const f = godVoice.listening ? 0.25 : 0.6; ambient.intensity = 0.9 + f * (0.6 + Math.sin(now / 70) * 0.4 + Math.random() * 0.3); hemi.intensity = 0.9 + f * 0.8; }
   for (const av of avatars.values()) av.update(dt, now);
   if (manager) manager.update(dt, now);
   updateParticles(dt);
@@ -1381,6 +1522,8 @@ function frame() {
     const want = followTarget.clone().add(new THREE.Vector3(5, 4.5, 6)); camera.position.lerp(want, 1 - Math.pow(0.05, dt));
   }
   controls.update();
+  // never let the camera sit inside or under the mezzanine slab: lift it above the floor there
+  if (camera.position.z > MEZZ.z0 - 0.6 && camera.position.y > -1 && camera.position.y < MEZZ.y + 0.5) { camera.position.y = MEZZ.y + 0.5; controls.update(); }
   composer.render();
   requestAnimationFrame(frame);
 }

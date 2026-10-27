@@ -113,6 +113,12 @@
   #log .msg.manager.bad { background: rgba(255,77,109,0.12); border-color: rgba(255,77,109,0.4); }
   #log .msg.agent { align-self: flex-start; background: rgba(57,217,138,0.1); border: 1px solid rgba(57,217,138,0.35); max-height: 220px; overflow: auto; }
   #chat #btnLog { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.1); padding: 6px 8px; }
+  #chat #btnMic { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.1); padding: 6px 8px; }
+  #chat #btnMic.listening { background: rgba(255,77,109,0.35); border-color: rgba(255,77,109,0.8); animation: micPulse 1s ease-in-out infinite; }
+  #chat #btnMic.speaking { background: rgba(255,230,160,0.35); border-color: rgba(255,230,160,0.9); }
+  @keyframes micPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,77,109,0.5); } 50% { box-shadow: 0 0 0 7px rgba(255,77,109,0); } }
+  #god { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); max-width: min(760px, 86vw); text-align: center; font-size: clamp(18px, 3vw, 34px); font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #fff4d6; text-shadow: 0 0 18px rgba(255,220,140,0.9), 0 0 60px rgba(255,200,80,0.6); pointer-events: none; opacity: 0; transition: opacity 0.4s; z-index: 4; }
+  #god.show { opacity: 1; }
   #reports { position: absolute; right: 14px; bottom: 70px; width: 390px; max-height: 58vh; display: none; flex-direction: column; overflow: hidden; border-color: rgba(255,176,32,0.45); }
   #reports.show { display: flex; }
   #reports .rh { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; background: rgba(255,176,32,0.14); border-bottom: 1px solid rgba(255,255,255,0.08); }
@@ -133,6 +139,34 @@
   .rep.open .rp { white-space: pre-wrap; }
   .rep .rq { color: var(--warn); margin-bottom: 4px; }
   #detail .kv select { font: inherit; font-size: 11px; color: var(--ink); background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15); border-radius: 5px; padding: 1px 4px; }
+  /* the brief: a big form for a long list of questions, read and answered in one go */
+  #brief { position: fixed; inset: 0; z-index: 20; display: none; place-items: center; background: rgba(4,5,12,0.62); backdrop-filter: blur(4px); pointer-events: auto; }
+  #brief.show { display: grid; }
+  #brief .bx { width: min(1180px, 94vw); height: min(860px, 88vh); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; border-color: rgba(255,176,32,0.55); box-shadow: 0 0 60px rgba(255,176,32,0.18); }
+  #brief .bh { display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; background: rgba(255,176,32,0.16); border-bottom: 1px solid rgba(255,255,255,0.08); }
+  #brief .bh b { flex: 1; font-size: 15px; }
+  #brief .bh .chip { font-size: 10px; padding: 2px 8px; border-radius: 999px; color: #0b0d17; font-weight: bold; text-transform: uppercase; letter-spacing: 0.06em; }
+  #brief .bh .x { cursor: pointer; color: var(--dim); font-size: 16px; } #brief .bh .x:hover { color: var(--ink); }
+  #brief .bm { display: grid; grid-template-columns: minmax(300px, 5fr) minmax(360px, 6fr); min-height: 0; }
+  #brief .bq { padding: 16px 18px; overflow: auto; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: #06070f; border-right: 1px solid rgba(255,255,255,0.08); color: #d4d9f5; }
+  #brief .bq .lbl, #brief .bf .lbl { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  #brief .bf { padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+  #brief .q { display: flex; flex-direction: column; gap: 6px; }
+  #brief .q .qt { font-size: 13px; line-height: 1.45; color: var(--ink); }
+  #brief .q .qt b { color: var(--warn); margin-right: 6px; }
+  #brief .q .qh { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  #brief .q textarea, #brief .q input[type=text] { font: inherit; font-size: 13px; color: var(--ink); background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 8px 10px; resize: vertical; min-height: 40px; width: 100%; }
+  #brief .q textarea:focus, #brief .q input[type=text]:focus { outline: none; border-color: rgba(255,176,32,0.7); }
+  #brief .q .opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  #brief .q .opts button { font-size: 12px; padding: 6px 10px; }
+  #brief .q .opts button.sel { background: rgba(255,176,32,0.3); border-color: rgba(255,176,32,0.8); }
+  #brief .q .opts button b { color: var(--warn); margin-right: 4px; }
+  #brief .bt { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-top: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); font-size: 11px; color: var(--dim); }
+  #brief .bt span { flex: 1; }
+  #brief .bt .send { background: rgba(255,176,32,0.3); border-color: rgba(255,176,32,0.7); font-size: 13px; padding: 8px 16px; }
+  #brief .bt .send:disabled { opacity: 0.5; cursor: default; }
+  .rep .ra, #detail .askAll { margin-top: 6px; font-size: 11px; padding: 4px 10px; background: rgba(255,176,32,0.2); border-color: rgba(255,176,32,0.5); }
+  @media (max-width: 900px) { #brief .bm { grid-template-columns: 1fr; grid-template-rows: 2fr 3fr; } #brief .bq { border-right: 0; border-bottom: 1px solid rgba(255,255,255,0.08); } }
   #empty { position: absolute; inset: 0; display: none; place-items: center; text-align: center; color: var(--dim); font-size: 13px; line-height: 1.7; }
   #empty.show { display: grid; }
   #empty code { color: var(--ink); }
@@ -181,9 +215,16 @@
   <form id="chat" class="panel">
     <span class="hat">👷</span>
     <input id="chatInput" placeholder="Tell the floor manager… “status”, “what is guide-library doing”, “send X to QA”, “new agent in <folder>: <task>”" autocomplete="off" />
+    <button type="button" id="btnMic" title="Hold the floor: speak and the whole office hears the voice of god">🎙</button>
     <button type="button" id="btnLog" title="Show the conversation">💬</button>
     <button type="submit">send</button>
   </form>
+  <div id="brief"><div class="bx panel">
+    <div class="bh"><span class="chip" id="bChip"></span><b id="bTitle"></b><span id="bMeta"></span><span class="x" id="bClose" title="close (esc)">✕</span></div>
+    <div class="bm"><div class="bq" id="bText"></div><div class="bf" id="bForm"></div></div>
+    <div class="bt"><span id="bHint"></span><button type="button" id="bLater">later</button><button type="button" class="send" id="bSend">send all answers ⏎</button></div>
+  </div></div>
+  <div id="god"></div>
   <div id="toast"></div>
   <div id="empty"><div>No agents yet.<br/>Start the Pixel Agents server with <code>npx pixel-agents --port 4848</code><br/>and open a Claude Code session anywhere on this Mac.</div></div>
 </div>
