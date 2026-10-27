@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "monitoragents",
+  "project_id": "1b2d7cfe-7284-4faa-b9be-d3819676b108"
+}
