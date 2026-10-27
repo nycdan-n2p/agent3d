@@ -8,6 +8,8 @@ import path from 'node:path';
 export const GRID = 24;   // studs per side
 export const LAYERS = 24; // bricks high
 const MAX_PER_CALL = 40, MAX_BRICKS = 2000, MAX_CHAT = 400;
+const GALLERY_MAX = 36;        // shelf slots in the gallery room: newest builds first
+const SHELVE_AFTER_MS = 30000; // a finished build sits on the table for the reveal lap, then goes to the gallery
 const SHAPES = ['brick', 'tile', 'slope', 'round'];
 const DIRS = ['n', 'e', 's', 'w'];
 
@@ -136,7 +138,10 @@ export function createPlayroom({ buildsDir, cli, broadcast, fx, markDirty, prese
     save();
     fx('legoEnd', null, { title: s.title, theme: s.theme, reason, bricks: s.bricks.size });
     markDirty();
+    clearTimeout(shelveTimer);
+    if (s.bricks.size) shelveTimer = setTimeout(() => { const r = shelve(); if (r.ok) onShelved?.(r); }, SHELVE_AFTER_MS);
   }
+  let shelveTimer = null; let onShelved = null;
   function save() {
     if (!s.bricks.size) return;
     try {
@@ -145,7 +150,14 @@ export function createPlayroom({ buildsDir, cli, broadcast, fx, markDirty, prese
       const file = path.join(buildsDir, `${new Date(s.startedAt).toISOString().replace(/[:.]/g, '-')}-${slug}.json`);
       const { title, theme, minutes, startedAt, endedAt, reason, players, chat } = s;
       fs.writeFileSync(file, JSON.stringify({ title, theme, minutes, startedAt, endedAt, reason, players, bricks: [...s.bricks.values()], chat }, null, 1));
+      return file;
     } catch (e) { console.log('[play] could not save the build:', e.message); }
+  }
+  const rootFiles = () => { try { return fs.readdirSync(buildsDir).filter((f) => f.endsWith('.json')); } catch { return []; } };
+  function moveRootFiles(sub) {
+    const files = rootFiles(); if (!files.length) return;
+    fs.mkdirSync(path.join(buildsDir, sub), { recursive: true });
+    for (const f of files) fs.renameSync(path.join(buildsDir, f), path.join(buildsDir, sub, f));
   }
   function loadLatest() {
     try {
@@ -158,21 +170,52 @@ export function createPlayroom({ buildsDir, cli, broadcast, fx, markDirty, prese
     } catch { /* nothing saved yet */ }
   }
   loadLatest();
-  // Take the last build apart to free the floor. Saved builds go to builds/shelf (kept, but no longer
-  // reloaded on start), so the table stays put away across restarts.
+  // Take the last build apart without keeping it: its file goes to builds/scrapped (not shown in the
+  // gallery, not reloaded on start), so the table stays put away across restarts.
   function clear() {
     if (s.active) return { ok: false, bricks: 0 };
+    clearTimeout(shelveTimer);
     const bricks = s.bricks.size;
-    try {
-      const files = fs.readdirSync(buildsDir).filter((f) => f.endsWith('.json'));
-      if (files.length) fs.mkdirSync(path.join(buildsDir, 'shelf'), { recursive: true });
-      for (const f of files) fs.renameSync(path.join(buildsDir, f), path.join(buildsDir, 'shelf', f));
-    } catch (e) { if (e.code !== 'ENOENT') console.log('[play] could not shelve builds:', e.message); }
+    try { moveRootFiles('scrapped'); } catch (e) { console.log('[play] could not put the build away:', e.message); }
     s = blank(); occ = new Map();
     broadcast(boardMsg());
     markDirty();
     return { ok: true, bricks };
   }
+  // Move the finished build off the table and onto a gallery shelf: builds/shelf/*.json is the gallery.
+  function shelve() {
+    if (s.active) return { ok: false, reason: 'active', bricks: 0 };
+    clearTimeout(shelveTimer);
+    const bricks = s.bricks.size, title = s.title || s.theme || 'untitled';
+    if (!bricks) return { ok: false, reason: 'empty', bricks: 0 };
+    try {
+      if (!rootFiles().length) save(); // a build that was never written (shouldn't happen, but keep it)
+      moveRootFiles('shelf');
+    } catch (e) { console.log('[play] could not shelve the build:', e.message); return { ok: false, reason: e.message, bricks }; }
+    s = blank(); occ = new Map();
+    broadcast(boardMsg()); broadcast(galleryMsg());
+    markDirty();
+    return { ok: true, bricks, title, slot: 0, total: gallery().length };
+  }
+  // The gallery: every shelved build, newest first, bricks in a compact form for the client to draw.
+  function gallery() {
+    let files = [];
+    try { files = fs.readdirSync(path.join(buildsDir, 'shelf')).filter((f) => f.endsWith('.json')).sort().reverse(); } catch { return []; }
+    const out = [];
+    for (const f of files.slice(0, GALLERY_MAX)) {
+      try {
+        const b = JSON.parse(fs.readFileSync(path.join(buildsDir, 'shelf', f), 'utf8'));
+        const bricks = Array.isArray(b.bricks) ? b.bricks : [];
+        out.push({
+          file: f, title: b.title || '', theme: b.theme || '', date: b.endedAt || b.startedAt || 0, reason: b.reason || '',
+          players: (b.players || []).map((p) => p.name), brickCount: bricks.length,
+          bricks: bricks.map((k) => [k.x, k.y, k.z, k.w, k.d, k.h, k.color, k.shape === 'brick' ? 0 : SHAPES.indexOf(k.shape), k.dir ? DIRS.indexOf(k.dir) : -1]),
+        });
+      } catch (e) { console.log('[play] skipping unreadable build', f, e.message); }
+    }
+    return out;
+  }
+  function galleryMsg() { return { type: 'legoGallery', colors: COLORS, max: GALLERY_MAX, builds: gallery() }; }
   setInterval(() => {
     if (!s.active) return;
     if (Date.now() > s.endsAt) end("time's up");
@@ -300,8 +343,10 @@ How to play well
   }
 
   return {
-    api, start, end, invite, clear,
+    api, start, end, invite, clear, shelve, gallery, galleryMsg,
+    onShelved: (fn) => { onShelved = fn; },
     isActive: () => s.active,
+    hasBuild: () => !s.active && s.bricks.size > 0,
     describe: () => s.title ? `"${s.title}"` : s.theme || 'something unique',
     boardMsg,
     meta: () => ({

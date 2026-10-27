@@ -444,6 +444,7 @@ function rebuildLego(now) {
   for (const [im, count] of n) { im.count = count; im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; }
 }
 function applyLego(m) {
+  if (m.type === 'legoGallery') { applyGallery(m); return; }
   if (m.type === 'lego') { Object.assign(legoColors, m.colors || {}); legoBricks = new Map(m.bricks.map((b) => [b.id, b])); }
   else if (m.type === 'legoAdd') {
     const now = Date.now(); m.bricks.forEach((b, i) => { b.addedAt = now + i * 60; legoBricks.set(b.id, b); });
@@ -452,6 +453,128 @@ function applyLego(m) {
   } else if (m.type === 'legoRemove') for (const id of m.ids) legoBricks.delete(id);
   rebuildLegoOcc(); legoDirty = true;
 }
+
+// ============================================================ lego gallery (shelved builds)
+// A side room off the Security bay: every build the agents finished sits on a shelf as a small model,
+// newest first. The bridge streams the list (builds/shelf/*.json) once at connect and when a build is shelved.
+// Avatars never walk here (computePath/LOUNGE are untouched): it's a room for looking.
+const GAL = { x0: 15.2, x1: 22.4, z0: -ROOM.d / 2 + 2, z1: 2.4, color: 0xdbac34, tiers: [0.85, 1.9, 2.95], slotW: 1.4, footprint: 1.2, maxH: 0.85 };
+// shelf units: 4 slots per tier, 3 tiers; a unit sits against a wall and its models face `normal`
+const GAL_UNITS = [
+  { x: 18.8, z: GAL.z0 + 0.2 + 0.5, along: 'x', normal: new THREE.Vector3(0, 0, 1) },   // back wall
+  { x: GAL.x1 - 0.2 - 0.5, z: -6.9, along: 'z', normal: new THREE.Vector3(-1, 0, 0) },   // right wall, back half
+  { x: GAL.x1 - 0.2 - 0.5, z: -0.9, along: 'z', normal: new THREE.Vector3(-1, 0, 0) },   // right wall, front half
+];
+const GAL_SLOTS = []; // { pos: Vector3 (shelf top, slot centre), normal, rotY }
+for (const u of GAL_UNITS) for (const y of [...GAL.tiers].reverse()) for (let i = 0; i < 4; i++) { // top shelf first
+  const off = (i - 1.5) * GAL.slotW;
+  GAL_SLOTS.push(u.along === 'x' ? { pos: new THREE.Vector3(u.x + off, y + 0.03, u.z), normal: u.normal, rotY: 0 } : { pos: new THREE.Vector3(u.x, y + 0.03, u.z + off), normal: u.normal, rotY: -Math.PI / 2 });
+}
+const galleryGroup = new THREE.Group(); scene.add(galleryGroup);
+const galleryBoards = []; // click targets: { mesh, w, h, normal, minDist, build }, one per shelved build, plus the sign
+let galleryBuilds = []; let galleryMax = GAL_SLOTS.length;
+const galMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.32, metalness: 0 });
+function galInstanced(geo, cap) { const im = new THREE.InstancedMesh(geo, galMat, cap); im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false; im.setColorAt(0, new THREE.Color(0xffffff)); im.count = 0; galleryGroup.add(im); return im; }
+const galBrickIM = galInstanced(new THREE.BoxGeometry(1, 1, 1), 40000), galRoundIM = galInstanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 20), 8000);
+const galSlopeIM = galInstanced(wedgeGeo(), 8000), galStudIM = galInstanced(STUD_GEO, 60000);
+galStudIM.castShadow = false;
+const galPlates = []; const galHits = [];
+let gallerySign = null; const galleryAnchor = new THREE.Object3D(); galleryAnchor.position.set(18.8, 1.6, -4.3); scene.add(galleryAnchor);
+function buildGallery() {
+  const g = galleryGroup;
+  // floor: small gold-tinted tiles
+  const tint = (base, col, k) => new THREE.Color(base).lerp(new THREE.Color(col), k).getHex();
+  const tA = mat(tint(0x2a2f55, GAL.color, 0.14), { roughness: 0.6 }), tB = mat(tint(0x232848, GAL.color, 0.14), { roughness: 0.6 });
+  const tile = new THREE.PlaneGeometry(1.2, 1.2); let n = 0;
+  for (let x = GAL.x0 + 0.6; x < GAL.x1 - 0.2; x += 1.2) for (let z = GAL.z0 + 0.8; z < GAL.z1; z += 1.2) { const t = new THREE.Mesh(tile, n++ % 2 ? tA : tB); t.rotation.x = -Math.PI / 2; t.position.set(x, 0.005, z); t.receiveShadow = true; g.add(t); }
+  // walls: the back wall carries on, a new right wall closes the room
+  const wallM = mat(0x1a1d36, { roughness: 0.95 });
+  const back = new THREE.Mesh(new THREE.BoxGeometry(GAL.x1 - 15 + 0.2, ROOM.h, 0.4), wallM); back.position.set((15 + GAL.x1 + 0.2) / 2, ROOM.h / 2, GAL.z0); back.receiveShadow = true; g.add(back);
+  const right = new THREE.Mesh(new THREE.BoxGeometry(0.4, ROOM.h, GAL.z1 - GAL.z0 + 0.4), wallM); right.position.set(GAL.x1, ROOM.h / 2, (GAL.z0 + GAL.z1) / 2); right.receiveShadow = true; g.add(right);
+  // a low rail toward the main floor and the corridor, with a gap by the corridor end as the doorway
+  const railM = mat(0x2a2d4a, { roughness: 0.8 });
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.1, 0.4 - GAL.z0), railM); rail.position.set(GAL.x0, 0.55, (GAL.z0 + 0.4) / 2); rail.castShadow = true; g.add(rail); // z0 .. 0.4, then the doorway
+  const front = new THREE.Mesh(new THREE.BoxGeometry(GAL.x1 - GAL.x0, 1.1, 0.22), railM); front.position.set((GAL.x0 + GAL.x1) / 2, 0.55, GAL.z1); front.castShadow = true; g.add(front);
+  // doorway posts and lintel, with the sign above
+  const postM = mat(0x0d0f20, { metalness: 0.4, roughness: 0.5 });
+  for (const z of [0.4, GAL.z1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(0.22, 3.3, 0.22), postM); post.position.set(GAL.x0, 1.65, z); post.castShadow = true; g.add(post); }
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, GAL.z1 - 0.4 + 0.22), postM); lintel.position.set(GAL.x0, 3.3, (0.4 + GAL.z1) / 2); g.add(lintel);
+  gallerySign = textSprite('🧱 LEGO GALLERY', { size: 50, color: '#111', bg: 'rgba(219,172,52,0.92)' }); gallerySign.position.set(GAL.x0, 3.95, (0.4 + GAL.z1) / 2); gallerySign.scale.set(3.4, 0.53, 1); g.add(gallerySign);
+  galleryBoards.push({ mesh: gallerySign, anchor: galleryAnchor, w: 7.4, h: 5, normal: new THREE.Vector3(-0.55, 0.42, 0.72).normalize(), sign: true });
+  // baseboard strip in gold
+  const strip = new THREE.Mesh(new THREE.BoxGeometry(GAL.x1 - GAL.x0, 0.08, 0.08), new THREE.MeshStandardMaterial({ color: GAL.color, emissive: GAL.color, emissiveIntensity: 0.7 }));
+  strip.position.set((GAL.x0 + GAL.x1) / 2, 0.06, GAL.z0 + 0.25); g.add(strip);
+  const strip2 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, GAL.z1 - GAL.z0), strip.material); strip2.position.set(GAL.x1 - 0.25, 0.06, (GAL.z0 + GAL.z1) / 2); g.add(strip2);
+  // shelf units: three planks on brackets per unit
+  const plankM = mat(0xd9b48f, { roughness: 0.55 }), bracketM = mat(0x3a3f6b);
+  for (const u of GAL_UNITS) for (const y of GAL.tiers) {
+    const len = GAL.slotW * 4;
+    const plank = new THREE.Mesh(u.along === 'x' ? new THREE.BoxGeometry(len, 0.06, 1.0) : new THREE.BoxGeometry(1.0, 0.06, len), plankM);
+    plank.position.set(u.x, y, u.z); plank.castShadow = true; plank.receiveShadow = true; g.add(plank);
+    for (const s of [-1, 1]) {
+      const br = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.3, 0.08), bracketM);
+      br.position.set(u.along === 'x' ? u.x + s * (len / 2 - 0.3) : u.x + 0.35, y - 0.18, u.along === 'x' ? u.z + 0.35 : u.z + s * (len / 2 - 0.3)); g.add(br);
+    }
+  }
+  // a wall label inside, at the back
+  const label = textSprite('finished builds · newest first', { size: 34, color: '#e8ecff', bg: 'rgba(219,172,52,0.22)' }); label.position.set(18.8, 4.1, GAL.z0 + 0.3); label.scale.set(4.4, 0.4, 1); g.add(label);
+  g.add(plant(GAL.x0 + 0.9, GAL.z0 + 1.1, 1.0));
+}
+const GAL_SHAPES = ['brick', 'tile', 'slope', 'round'], GAL_DIRS = ['n', 'e', 's', 'w'];
+function galleryDate(t) { try { return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch { return ''; } }
+function galleryTitle(b) { return (b.title || b.theme || 'untitled').slice(0, 24); }
+// lay every shelved build out on its slot: one matrix per brick, scaled to fit the slot
+function rebuildGallery() {
+  const n = new Map([[galBrickIM, 0], [galRoundIM, 0], [galSlopeIM, 0], [galStudIM, 0]]);
+  const put = (im) => { const i = n.get(im); if (i >= im.instanceMatrix.count) return; im.setMatrixAt(i, _m); im.setColorAt(i, _c); n.set(im, i + 1); };
+  const M = new THREE.Matrix4(), L = new THREE.Matrix4(), rot = new THREE.Quaternion(), sc = new THREE.Vector3();
+  for (const h of galHits) { galleryGroup.remove(h); h.geometry.dispose(); } galHits.length = 0;
+  galleryBoards.splice(1); // keep the sign
+  galleryBuilds.forEach((b, slot) => {
+    const sl = GAL_SLOTS[slot]; if (!sl) return;
+    const bricks = b.bricks || []; let top = 1; const occ = new Set();
+    for (const k of bricks) { top = Math.max(top, k[1] + k[5]); for (let y = k[1]; y < k[1] + k[5]; y++) for (let x = k[0]; x < k[0] + k[3]; x++) for (let z = k[2]; z < k[2] + k[4]; z++) occ.add(`${x},${y},${z}`); }
+    const f = Math.min(GAL.footprint / (LEGO.N * LEGO.S), GAL.maxH / (top * LEGO.H));
+    rot.setFromAxisAngle(_up, sl.rotY); sc.setScalar(f); M.compose(sl.pos, rot, sc);
+    for (const k of bricks) {
+      const [x, y, z, w, d, hh, color, shape, dir] = k; const sh = GAL_SHAPES[shape] || 'brick', dr = GAL_DIRS[dir] || null;
+      const sideways = sh === 'slope' && (dr === 'e' || dr === 'w');
+      _c.set(legoColors[color] || '#cccccc');
+      _p.set((x + w / 2 - LEGO.N / 2) * LEGO.S, (y + hh / 2) * LEGO.H, (z + d / 2 - LEGO.N / 2) * LEGO.S);
+      _s.set((sideways ? d : w) * LEGO.S - 0.006, hh * LEGO.H - 0.004, (sideways ? w : d) * LEGO.S - 0.006);
+      _q.setFromAxisAngle(_up, sh === 'slope' ? DIR_ANGLE[dr] || 0 : 0);
+      L.compose(_p, _q, _s); _m.multiplyMatrices(M, L); put(sh === 'slope' ? galSlopeIM : sh === 'round' ? galRoundIM : galBrickIM);
+      if (sh !== 'brick' && sh !== 'round') continue;
+      _q.identity(); _s.set(1, 1, 1);
+      for (let sx = x; sx < x + w; sx++) for (let sz = z; sz < z + d; sz++) {
+        if (occ.has(`${sx},${y + hh},${sz}`)) continue;
+        _p.set((sx + 0.5 - LEGO.N / 2) * LEGO.S, (y + hh) * LEGO.H + 0.0175, (sz + 0.5 - LEGO.N / 2) * LEGO.S); L.compose(_p, _q, _s); _m.multiplyMatrices(M, L); put(galStudIM);
+      }
+    }
+    // the plate under the model, and an invisible box over it to click
+    let plate = galPlates[slot]; if (!plate) { plate = textSprite('', { size: 36 }); plate.scale.set(1.3, 0.2, 1); galleryGroup.add(plate); galPlates[slot] = plate; }
+    updateSprite(plate, `${galleryTitle(b)} · ${galleryDate(b.date)}`, { size: 36, color: '#fff', bg: 'rgba(12,14,30,0.85)', tab: '#dbac34' });
+    plate.position.copy(sl.pos).addScaledVector(sl.normal, 0.62); plate.position.y += 0.02; plate.visible = true; // hangs on the shelf's front edge
+    const modelH = top * LEGO.H * f;
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(GAL.footprint, modelH + 0.2, GAL.footprint), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+    hit.position.copy(sl.pos); hit.position.y += modelH / 2 + 0.05; hit.userData.slot = slot; galleryGroup.add(hit); galHits.push(hit);
+    galleryBoards.push({ mesh: hit, w: GAL.footprint + 0.2, h: Math.max(0.9, modelH + 0.3), normal: sl.normal, minDist: 2.0, build: b, slot });
+  });
+  for (let i = galleryBuilds.length; i < galPlates.length; i++) if (galPlates[i]) galPlates[i].visible = false;
+  for (const [im, count] of n) { im.count = count; im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; }
+  if (boardZoom?.board?.build) { // you were looking at a shelved build: keep following it (it may have moved a slot), or step back if it went
+    const again = galleryBoards.find((b) => b.build?.file === boardZoom.board.build.file);
+    if (again) boardZoom.board = again; else endBoardZoom();
+  }
+}
+function applyGallery(m) {
+  Object.assign(legoColors, m.colors || {});
+  galleryMax = Math.min(GAL_SLOTS.length, m.max || GAL_SLOTS.length);
+  galleryBuilds = (m.builds || []).slice(0, galleryMax);
+  rebuildGallery();
+}
+function gallerySlotWorld(slot) { const sl = GAL_SLOTS[slot]; return sl ? sl.pos.clone() : galleryAnchor.position.clone(); }
+window.__officeGallery = (builds) => { applyGallery({ builds: Array.isArray(builds) ? builds : [] }); return galleryBuilds.length; }; // debug hook: feed fake shelved builds
 
 // ============================================================ text sprites + screens
 // a plate: rounded box with the text, and with `tab` a colour block down its left edge (the project colour)
@@ -531,6 +654,7 @@ function buildDesk(x, z, register = true) {
 }
 for (const k of DEPT_ORDER) for (const z of DESK_ROWS) for (const dx of [-1.8, 1.8]) buildDesk(DEPTS[k].cx + dx, z);
 buildRoom();
+buildGallery();
 // ---------- the mezzanine: your office, up the stairs, looking down over the floor ----------
 function buildMezzanine() {
   const g = new THREE.Group(); scene.add(g);
@@ -1221,16 +1345,19 @@ function zoomPose(b) {
   const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   let d = Math.max(b.h / (2 * BOARD_FILL * tanHalf), b.w / (2 * BOARD_FILL * tanHalf * camera.aspect));
   if (b.maxDist) d = Math.min(d, b.maxDist);
-  const target = b.mesh.getWorldPosition(new THREE.Vector3());
+  const target = (b.anchor || b.mesh).getWorldPosition(new THREE.Vector3());
   return { target, pos: target.clone().addScaledVector(b.normal, d) };
 }
 function startBoardZoom(b) {
   endReveal(); followId = null; renderRoster(lastAgents);
   boardZoom = { board: b, wasAutoRotate: boardZoom ? boardZoom.wasAutoRotate : controls.autoRotate };
   controls.autoRotate = false; controls.maxPolarAngle = Math.PI / 2; // the board is at eye level: let the camera look straight at it
+  controls.minDistance = b.minDist || 4; // a shelf model is small: let the camera get close
 }
-function endBoardZoom() { if (!boardZoom) return; controls.autoRotate = boardZoom.wasAutoRotate; controls.maxPolarAngle = Math.PI * 0.49; boardZoom = null; }
-controls.addEventListener('start', endBoardZoom);
+function endBoardZoom() { if (!boardZoom) return; controls.autoRotate = boardZoom.wasAutoRotate; controls.maxPolarAngle = Math.PI * 0.49; controls.minDistance = 4; boardZoom = null; }
+const allBoards = () => [...boards, ...galleryBoards];
+// OrbitControls fires 'start' on every pointerdown, clicks included, so a click on the zoomed board could never step back:
+// the zoom ends on a real drag (more than 5px with a button down) or a wheel turn instead (see the pointer handlers below).
 let rosterSig = '';
 function renderRoster(agents) {
   const rows = [];
@@ -1405,11 +1532,13 @@ addEventListener('keydown', (e) => {
 // click to follow
 const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointermove', (e) => { if (boardZoom && e.buttons && downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) endBoardZoom(); }); // a drag hands the camera back
+renderer.domElement.addEventListener('wheel', () => endBoardZoom(), { passive: true });
 let hoverAt = 0;
 renderer.domElement.addEventListener('pointermove', (e) => {
   if (e.buttons || performance.now() - hoverAt < 80) return; hoverAt = performance.now();
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera);
-  renderer.domElement.style.cursor = ray.intersectObjects([...binParts, ...boards.map((b) => b.mesh)], true).length ? 'pointer' : '';
+  renderer.domElement.style.cursor = ray.intersectObjects([...binParts, ...allBoards().map((b) => b.mesh)], true).length ? 'pointer' : '';
 });
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
@@ -1424,8 +1553,8 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   const hit = hits.find((h) => { let o = h.object; while (o && o.userData.avatarId === undefined) o = o.parent; return o; });
   const binHit = ray.intersectObjects(binParts, true)[0];
   if (binHit && (!hit || binHit.distance < hit.distance)) { reportsPanel.classList.contains('show') ? closeReports() : openReports(); return; }
-  const boardHit = ray.intersectObjects(boards.map((b) => b.mesh))[0];
-  if (boardHit && (!hit || boardHit.distance < hit.distance)) { const b = boards.find((x) => x.mesh === boardHit.object); boardZoom?.board === b ? endBoardZoom() : startBoardZoom(b); return; } // click again to step back
+  const boardHit = ray.intersectObjects(allBoards().map((b) => b.mesh))[0];
+  if (boardHit && (!hit || boardHit.distance < hit.distance)) { const b = allBoards().find((x) => x.mesh === boardHit.object); boardZoom?.board === b ? endBoardZoom() : startBoardZoom(b); return; } // click again to step back
   if (hit) { let o = hit.object; while (o && o.userData.avatarId === undefined) o = o.parent; endReveal(); endBoardZoom(); followId = followId === o.userData.avatarId ? null : o.userData.avatarId; renderRoster(lastAgents); renderDetail(); }
 });
 
@@ -1460,7 +1589,7 @@ window.__officeProject = (id) => { const av = avatars.get(id); if (!av) return n
 window.__officeProjectPick = (name) => { selectProject(name || null); return effProject(); }; // debug hook: switch tabs from the console
 window.__officeProjects = (list) => { lastProjects = list; lastAgents = lastAgents.map((a) => ({ ...a })); renderProjects(); return lastProjects; }; // debug hook: fake the projects list
 window.__officeCam = (p, t) => { endReveal(); followId = null; camera.position.set(...p); controls.target.set(...t); }; // debug hook: place the camera
-window.__officeDebug = () => ({ project: effProject(), projectRoot: selRoot(), projects: lastProjects.map((p) => ({ name: p.name, agents: p.agents, waiting: p.waiting, color: p.color, root: p.root })), board: projBoard ? { name: projBoard.name, issues: projBoard.issues.length, beads: projBoard.beads } : 'home', ghosts: [...avatars.values()].filter((a) => a.ghost).map((a) => a.id), huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
+window.__officeDebug = () => ({ gallery: { builds: galleryBuilds.length, slots: GAL_SLOTS.length, counts: [galBrickIM.count, galRoundIM.count, galSlopeIM.count, galStudIM.count], slot0: GAL_SLOTS[0].pos.toArray(), plate0: galPlates[0]?.position.toArray(), hit0: galHits[0]?.position.toArray(), titles: galleryBuilds.map(galleryTitle), hits: galHits.length, zoom: boardZoom?.board?.build ? galleryTitle(boardZoom.board.build) : boardZoom?.board?.sign ? 'sign' : null, minDist: controls.minDistance }, project: effProject(), projectRoot: selRoot(), projects: lastProjects.map((p) => ({ name: p.name, agents: p.agents, waiting: p.waiting, color: p.color, root: p.root })), board: projBoard ? { name: projBoard.name, issues: projBoard.issues.length, beads: projBoard.beads } : 'home', ghosts: [...avatars.values()].filter((a) => a.ghost).map((a) => a.id), huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
   const av = avatars.get(f.id); const name = av ? av.name() : `agent ${f.id}`; const proj = av?.data.project || null;
   if (f.kind === 'toolStart') { toolStats.push({ t: Date.now(), kind: toolKind(f.toolName) }); pushFeed('tool', name, (f.status || prettyTool(f.toolName)).replace(/mcp__\S+/g, (m) => prettyTool(m)), proj); }
@@ -1493,6 +1622,11 @@ function applyFx(f) {
     const what = f.title ? `“${f.title}”` : f.theme || 'their build';
     manager.say(`Playtime's over! They built ${what}`, { color: '#fff', bg: 'rgba(35,120,65,0.95)', ms: 9000 }); manager.jumpV = 2.4; chime();
     toast(`Playtime's over (${f.reason}): ${what}, ${f.bricks} bricks`); pushFeed('manager', 'floor manager', `playtime over: ${what}`); return;
+  }
+  if (f.kind === 'legoShelved') {
+    const p = gallerySlotWorld(0); for (let i = 0; i < 2; i++) setTimeout(() => burstConfetti(p.x, p.y + 0.6, p.z, 0xdbac34), i * 300);
+    manager.say(`“${f.title}” is in the gallery now`, { color: '#111', bg: 'rgba(219,172,52,0.95)', ms: 7000 }); chime();
+    toast(`“${f.title}” went to the gallery shelf (${f.total} on display)`); pushFeed('manager', 'floor manager', `shelved “${f.title}” in the gallery`); drawBoard(lastAgents); return;
   }
   if (f.kind === 'managerTarget') { if (manager.task) { manager.task.pendingTarget = f.id; manager.task.phase = 'walk'; } return; }
   if (f.kind === 'huddle') {

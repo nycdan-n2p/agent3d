@@ -122,6 +122,11 @@ function markDirty() { dirty = true; try { saveQueue(); } catch { /* before the 
 setInterval(() => { if (dirty) { dirty = false; broadcast(snapshot()); } }, 50);
 function fx(kind, id, extra = {}) { broadcast({ type: 'fx', kind, id, ...extra }); }
 const play = createPlayroom({ buildsDir: path.join(__dirname, 'builds'), cli: LEGO_CLI, broadcast, fx, markDirty, present: (id) => agents.has(id) });
+play.onShelved((r) => { // a finished build went to the gallery on its own, after the reveal
+  const message = `Moved "${r.title}" (${r.bricks} bricks) to the gallery shelf. ${r.total} build${r.total === 1 ? '' : 's'} on display; the play table is clear.`;
+  logChat('manager', 'floor manager', message, { ok: true, action: 'play' });
+  fx('legoShelved', null, { title: r.title, bricks: r.bricks, total: r.total, auto: true });
+});
 
 // ---------- what does the agent want? (read from its transcript) ----------
 function summarizeInput(name, input = {}) {
@@ -597,6 +602,7 @@ async function launchAgentNow(dir) {
 // ---------- playtime ----------
 function parsePlay(text) {
   const t = text.trim();
+  if (/^(?:please\s+)?(?:shelve|shelf|display|keep|archive)\s+(?:(?:the|that)\s+)?(?:lego|build|board|model)\b|^(?:please\s+)?shelve\s+it\b|^(?:please\s+)?(?:put|move)\s+(?:it|(?:the|that)\s+(?:lego|build|model))\s+(?:in|into|on|to)\s+the\s+(?:gallery|shelf|shelves)\b|^(?:to\s+the\s+)?gallery[!.]?$/i.test(t)) return { kind: 'shelve' };
   if (/^(?:please\s+)?(?:take\s+apart|tear\s+down|break\s+up|clear(?:\s+away)?|tidy(?:\s+up)?|pack\s+(?:up|away)|put\s+away|dismantle)\s+(?:the\s+|that\s+)?(?:lego|build|board|play\s*table)\b/i.test(t)) return { kind: 'clear' };
   if (/^(?:stop|end|finish|quit)\s+(?:the\s+)?(?:playing|play|playtime|game|lego)\b|^(?:playtime(?:'s| is)? over|back to work)\b/i.test(t)) return { kind: 'stop' };
   const m = t.match(/^(?:ok(?:ay)?[,!]?\s+)?(?:let'?s\s+|go\s+|time\s+to\s+)?(?:play(?:time)?|lego)\b[\s:,!.-]*(.*)$/i);
@@ -621,11 +627,19 @@ function playHandle(req) {
     play.end('stopped by you'); result.ok = true; result.message = 'Playtime is over. Back to work, everyone.';
     return { result, deliver: async () => ({ targetId: null, message: 'Board is saved. Back to work.' }) };
   }
+  if (req.kind === 'shelve') {
+    if (play.isActive()) { result.message = `They're still building ${play.describe()}. Say "stop playing" first, then I'll shelve it.`; return { result, deliver: null }; }
+    const r = play.shelve();
+    if (!r.ok) { result.message = r.reason === 'empty' ? 'There is nothing on the play table to shelve.' : `Couldn't shelve it: ${r.reason}.`; return { result, deliver: null }; }
+    result.ok = true; result.message = `Put "${r.title}" (${r.bricks} bricks) on the gallery shelf. ${r.total} build${r.total === 1 ? '' : 's'} on display; the play table is clear.`;
+    fx('legoShelved', null, { title: r.title, bricks: r.bricks, total: r.total, auto: false });
+    return { result, deliver: null };
+  }
   if (req.kind === 'clear') {
     if (play.isActive()) { result.message = `They're still building ${play.describe()}. Say "stop playing" first.`; return { result, deliver: null }; }
     const { bricks } = play.clear();
     result.ok = true;
-    result.message = bricks ? `Took apart ${bricks} bricks and put the table away. The floor is clear.` : 'The table is already put away.';
+    result.message = bricks ? `Took apart ${bricks} bricks and put the table away without shelving it. The floor is clear.` : 'The table is already put away.';
     return { result, deliver: null };
   }
   if (play.isActive()) { result.message = `They're already building ${play.describe()}. Say "stop playing" to end it.`; return { result, deliver: null }; }
@@ -1557,12 +1571,14 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
     res.write(`data: ${JSON.stringify(play.boardMsg())}\n\n`);
+    res.write(`data: ${JSON.stringify(play.galleryMsg())}\n\n`);
     sseClients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 15000);
     req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
     return;
   }
   if (url.pathname === '/api/state') return json(res, 200, snapshot());
+  if (url.pathname === '/api/gallery') return json(res, 200, { ok: true, ...play.galleryMsg() }); // every shelved build, newest first
   if (url.pathname === '/api/manager' && req.method === 'POST') {
     const body = await readBody(req);
     let text = typeof body.text === 'string' ? body.text : '';
