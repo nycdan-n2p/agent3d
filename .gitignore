@@ -12,3 +12,6 @@ names.json
 screens/
 office-queue.json
 office-projects.json
+
+# local security audits, never published
+reports/
