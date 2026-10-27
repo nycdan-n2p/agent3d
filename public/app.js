@@ -1425,27 +1425,13 @@ function godStart(listeningNow, text) {
   if (!listeningNow) rumble(); // thunder under his words
 }
 function godEnd() { godVoice = null; godEl.classList.remove('show'); micBtn.classList.remove('listening', 'speaking'); }
-function pickGodVoice() { // the deepest english voice the browser has
-  const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
-  const prefs = [/daniel/i, /google uk english male/i, /fred/i, /alex/i, /male/i, /^en-GB/i];
-  for (const re of prefs) { const v = vs.find((x) => re.test(x.name) || re.test(x.lang)); if (v) return v; }
-  return vs[0] || null;
-}
 let godTimer = 0;
-function voiceOfGod(text, { send = true } = {}) { // boom it out, hold the floor in awe, hand the words to the manager
+function voiceOfGod(text, { send = true } = {}) { // hold the floor in awe for a beat, then hand the words to the manager
   if (!text) return;
   clearTimeout(godTimer);
   godStart(false, text);
   if (send) askManager(text);
-  const fallbackMs = 1500 + text.length * 70;
-  if (!('speechSynthesis' in window)) { godTimer = setTimeout(godEnd, fallbackMs); return; }
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.pitch = 0.35; u.rate = 0.78; u.volume = 1; const v = pickGodVoice(); if (v) u.voice = v;
-  let done = false; const finish = () => { if (done) return; done = true; clearTimeout(godTimer); godEnd(); };
-  u.onend = finish; u.onerror = finish;
-  godTimer = setTimeout(finish, fallbackMs * 2 + 4000); // some browsers never fire onend
-  speechSynthesis.speak(u);
+  godTimer = setTimeout(godEnd, 1200 + Math.min(text.length, 160) * 45); // long enough to read the words off the sky
 }
 function rumble() { // a low thunder bed while he speaks
   if (!soundOn) return; actx ??= new (window.AudioContext || window.webkitAudioContext)();
