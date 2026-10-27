@@ -129,6 +129,11 @@
   #play .pc .who { font-weight: bold; }
   #play .pc .build, #play .pc .done, #play .pc .title { color: var(--dim); }
   #play .pc .system { color: var(--warn); }
+  /* collapsible panels: the ▾ in the header folds the panel down to its title bar */
+  .mini { cursor: pointer; color: var(--dim); font-style: normal; flex-shrink: 0; display: inline-block; transition: transform 0.15s; } .mini:hover { color: var(--ink); }
+  .panel.min .mini { transform: rotate(-90deg); }
+  #play.min { min-height: 0; } #play.min .pp, #play.min .pc { display: none; }
+  #detail.min .screen, #detail.min .term, #detail.min .reply { display: none !important; }
   .row { grid-template-columns: 12px 1fr auto auto; }
   .row .dp { font-size: 9px; padding: 2px 5px; border-radius: 4px; letter-spacing: 0.05em; text-transform: uppercase; border: 1px solid currentColor; opacity: 0.85; }
   .chip { display: inline-block; font-size: 9.5px; padding: 2px 6px; border-radius: 4px; color: #0b0d17; font-weight: bold; letter-spacing: 0.05em; text-transform: uppercase; }
@@ -235,10 +240,10 @@
   <div id="reports" class="panel"><div class="rh"><b>📋 Reports</b><span id="rCount"></span><span class="x" id="reportsClose">✕</span></div><div class="rl" id="rList"><div class="none">No reports yet. When an agent finishes a task it walks to the office and drops one here.</div></div></div>
   <div id="log" class="panel"><div class="lh"><b>💬 floor manager</b><span class="x" id="logClose">✕</span></div><div class="lc" id="logBody"></div></div>
   <div id="roster" class="panel"></div>
-  <div id="play" class="panel"><div class="ph"><b id="pTitle"></b><span id="pClock"></span></div><div class="pp" id="pPlayers"></div><div class="pc" id="pChat"></div></div>
+  <div id="play" class="panel"><div class="ph"><b id="pTitle"></b><span id="pClock"></span><em class="mini" id="playMin" title="collapse / expand">▾</em></div><div class="pp" id="pPlayers"></div><div class="pc" id="pChat"></div></div>
   <div id="help" class="panel">drag to orbit · scroll to zoom · click an agent to follow · <kbd>esc</kbd> release</div>
   <div id="detail" class="panel">
-    <div class="bar"><span class="sw" id="dSw"></span><span class="name" id="dName"></span><span class="x" id="detailClose">✕</span></div>
+    <div class="bar"><span class="sw" id="dSw"></span><span class="name" id="dName"></span><span class="x mini" id="detailMin" title="collapse / expand">▾</span><span class="x" id="detailClose">✕</span></div>
     <div class="screen" id="dScreen"></div>
     <pre class="term" id="dTerm"></pre>
     <form class="reply" id="dReply">

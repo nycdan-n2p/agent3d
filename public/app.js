@@ -1057,6 +1057,15 @@ function logChat(m, { show = true } = {}) {
 function mdLite(s) { return String(s || '').replace(/^#{1,6}\s+/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').trim(); }
 $('#logClose').onclick = () => logPanel.classList.remove('show');
 $('#btnLog').onclick = () => { logPanel.classList.toggle('show'); logBody.scrollTop = logBody.scrollHeight; };
+// the chat box grows with multi-line drafts, so keep the log sitting just above it instead of under it
+const seatLog = () => { logPanel.style.bottom = `${window.innerHeight - $('#chat').getBoundingClientRect().top + 8}px`; };
+new ResizeObserver(seatLog).observe($('#chat')); window.addEventListener('resize', seatLog);
+// ▾ folds a panel to its title bar; remembered per panel across reloads
+function collapsible(panel, btn, key) {
+  const set = (on) => { panel.classList.toggle('min', on); try { localStorage.setItem(key, on ? '1' : ''); } catch { /* private window */ } };
+  try { panel.classList.toggle('min', localStorage.getItem(key) === '1'); } catch { /* private window */ }
+  btn.onclick = (e) => { e.stopPropagation(); set(!panel.classList.contains('min')); };
+}
 // ---------- the big screen: a screenshot, wireframe or page an agent handed you, full screen until you press esc ----------
 const screenEl = $('#screen'); let screen = null; // { items, i, from }
 function openScreen(items, from, i = 0) {
@@ -1254,6 +1263,7 @@ function renderRoster(agents) {
 }
 const detail = $('#detail'); const dScreen = $('#dScreen'), dTerm = $('#dTerm'), dReply = $('#dReply'), dInput = $('#dInput');
 function ago(t) { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`; }
+collapsible(detail, $('#detailMin'), 'office.min.detail');
 $('#detailClose').onclick = () => { followId = null; renderRoster(lastAgents); renderDetail(); };
 // click the name in the detail bar to rename the agent; Enter saves, Esc cancels, an empty name goes back to the given one
 const dName = $('#dName'); dName.title = 'click to rename';
@@ -1347,6 +1357,7 @@ function renderDetail() {
 }
 setInterval(renderDetail, 1000);
 const playPanel = $('#play'), pTitle = $('#pTitle'), pClock = $('#pClock'), pPlayers = $('#pPlayers'), pChat = $('#pChat');
+collapsible(playPanel, $('#playMin'), 'office.min.play');
 let playSig = '';
 function renderPlay() {
   const p = lastPlay;
