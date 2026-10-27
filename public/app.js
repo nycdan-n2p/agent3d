@@ -90,13 +90,12 @@ const fill = new THREE.PointLight(0x7c5cff, 30, 40, 1.6);
 fill.position.set(-8, 6, 6);
 scene.add(fill);
 
-const DAY = { bg: new THREE.Color(0xaecbff), hemi: 1.1, sun: 2.4, sunColor: new THREE.Color(0xfff1d6), fog: 0xaecbff, fill: 8, exposure: 1.05 };
-const NIGHT = { bg: new THREE.Color(0x070812), hemi: 0.75, sun: 0.9, sunColor: new THREE.Color(0x9fb3ff), fog: 0x070812, fill: 60, exposure: 1.25 };
-// warm ceiling lamps so the night office stays readable
-for (const [x, z] of [[-6, -6], [6, -6], [-6, 0], [6, 0], [0, 8]]) {
-  const lamp = new THREE.PointLight(0xffe2b8, 18, 16, 1.4); lamp.position.set(x, 5.5, z); scene.add(lamp);
-  const bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0xffe2b8, emissive: 0xffe2b8, emissiveIntensity: 1.6 })); bulb.position.set(x, 6.2, z); scene.add(bulb);
-}
+// warm ambient light keeps the night office readable without ceiling lamps
+const ambient = new THREE.AmbientLight(0xffe2b8, 0.9);
+scene.add(ambient);
+
+const DAY = { bg: new THREE.Color(0xaecbff), hemi: 1.1, sun: 2.4, sunColor: new THREE.Color(0xfff1d6), fog: 0xaecbff, fill: 8, ambient: 0.35, exposure: 1.05 };
+const NIGHT = { bg: new THREE.Color(0x070812), hemi: 0.75, sun: 0.9, sunColor: new THREE.Color(0x9fb3ff), fog: 0x070812, fill: 60, ambient: 0.9, exposure: 1.25 };
 let nightT = 1; // 1 = night
 let nightTarget = 1;
 scene.fog = new THREE.Fog(0x070812, 40, 90);
@@ -108,6 +107,7 @@ function applySky(dt) {
   sun.intensity = lerp(DAY.sun, NIGHT.sun, nightT);
   sun.color.copy(DAY.sunColor).lerp(NIGHT.sunColor, nightT);
   fill.intensity = lerp(DAY.fill, NIGHT.fill, nightT);
+  ambient.intensity = lerp(DAY.ambient, NIGHT.ambient, nightT);
   renderer.toneMappingExposure = lerp(DAY.exposure, NIGHT.exposure, nightT);
   bloom.strength = lerp(0.25, 0.7, nightT);
 }
