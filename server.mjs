@@ -583,6 +583,12 @@ function statusAnswer(text) {
     if (!issues.length) return 'The board is clear: no open tasks.';
     return `${issues.length} open:\n` + issues.slice(0, 12).map((i) => `${i.id} P${i.priority} ${i.status === 'in_progress' ? '◐' : '○'} ${i.title}${i.assignee ? ` (${i.assignee})` : ''}`).join('\n') + (issues.length > 12 ? `\n…and ${issues.length - 12} more` : '');
   }
+  if (/^(skills|what skills|who (?:can|does) what skills?|skill list)$/.test(t)) return Object.keys(DEPT_SKILLS).map((d) => `${DEPT_NAMES[d]}: ${DEPT_SKILLS[d].map((k) => `/${k.skill}`).join(', ')}`).join('\n');
+  if ((m = t.match(/^what (?:can|does) (.+?) (?:do|know|handle|run)$/))) {
+    const a = findAgent(m[1]); if (!a) return `Nobody here is called "${m[1]}".`;
+    const ks = DEPT_SKILLS[a.dept] || [];
+    return `${agentName(a)} is ${DEPT_NAMES[a.dept]}${a.hasTerminal ? '' : ' (desktop session: I can\'t type into them)'}.${ks.length ? ' Skills: ' + ks.map((k) => `/${k.skill} (${k.what})`).join('; ') : ''}`;
+  }
   if (/^(team|the team|who does what|roles|jobs|who(?:'s| is) (?:on )?(?:qa|security|ui ?\/? ?ux|engineering))$/.test(t)) {
     if (!list.length) return 'Nobody is on the floor.';
     return Object.keys(DEPT_NAMES).map((d) => `${DEPT_NAMES[d]}: ${list.filter((a) => a.dept === d).map((a) => `${agentName(a)}${a.hasTerminal ? '' : ' (desktop)'}`).join(', ') || 'nobody'}`).join('\n');
@@ -617,6 +623,39 @@ function parseMove(text) {
   return { name: m[1], dept: DEPT_ALIASES[m[2].toLowerCase().replace(/\s+/g, '')] };
 }
 // ---------- specialists: who takes a task, and bringing one in when nobody with that job is free ----------
+// ---------- skills: each job owns the skills installed on this Mac that do that job ----------
+// When the manager hands a task to a specialist he invokes the matching skill as a slash command,
+// so "ask Ezra for a security report" runs /security-report, not an improvised audit. The first
+// skill of a job is its default, used whenever the task reads as that job's kind of work.
+// Skills live in ~/.claude/skills (user-wide, so every session has them); code-review, simplify and
+// security-review are Claude Code built-ins.
+const DEPT_SKILLS = {
+  security: [
+    { skill: 'security-report', what: 'read-only security audit of a repo, service or diff; HTML report with OWASP/WSTG coverage', trigger: /\b(security (?:report|audit|review|check|scan)|audit|pentest|owasp|wstg|vulnerab\w*|is (?:it|this) secure)\b/i },
+    { skill: 'security-review', what: 'security review of the pending changes on the current branch', trigger: /\b(review (?:the |my )?(?:changes|diff|branch|pr)|pending changes)\b/i },
+  ],
+  uiux: [
+    { skill: 'frontend-design', what: 'distinctive, production-grade UI: pages, components, layouts, styling', trigger: /\b(design|restyle|style|styling|layout|ui|ux|component|page|landing|dashboard|theme|look|polish|beautif\w*)\b/i },
+    { skill: 'gpt-image-2-style-library', what: 'image-generation prompts and visual styles', trigger: /\b(image prompt|image style|generate an? image|illustration|poster|visual style)\b/i },
+  ],
+  qa: [
+    { skill: 'replay-qa-loop', what: 'explore the running app, find and root-cause bugs, loop on fixes', trigger: /\b(qa|test the app|run qa|find bugs|bug hunt|explore the app|regression)\b/i },
+    { skill: 'code-review', what: 'review a diff, PR or branch for correctness bugs', trigger: /\b(code review|review (?:the |my |this )?(?:code|diff|pr|branch|changes))\b/i },
+  ],
+  engineering: [
+    { skill: 'codebase-memory', what: 'structural questions about the codebase: architecture, callers, dependencies, dead code', trigger: /\b(architecture|who calls|call chain|dependencies|dead code|explore the codebase|structure of)\b/i },
+    { skill: 'simplify', what: 'simplify and clean up the changed code', trigger: /\b(simplify|clean ?up|refactor)\b/i },
+    { skill: 'graphify', what: 'turn code or docs into a knowledge graph', trigger: /\b(knowledge graph|graphify)\b/i },
+  ],
+};
+// Which skill a task should run for an agent with this job, or null for plain work.
+function skillFor(dept, prompt) {
+  const list = DEPT_SKILLS[dept] || []; if (!list.length) return null;
+  const hit = list.find((k) => k.trigger.test(prompt)); if (hit) return hit.skill;
+  if (dept !== 'engineering' && classifyText(prompt) === dept) return list[0].skill; // in-job work without a named skill: the job's default
+  return null;
+}
+function withSkill(prompt, skill) { return skill && !/^\s*\//.test(prompt) ? `/${skill} ${prompt}` : prompt; }
 const HANDOFF_RULE = '\n\n(Office rule: when you are done, if this needs follow-up by QA, Security or UI/UX, end your final reply with one line exactly like "HANDOFF: qa — <what they should do>", using qa, security or uiux.)';
 function pickSpecialist(dept, exceptId = null) {
   const pool = [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.id !== exceptId && a.dept === dept && !playing(a.id));
@@ -638,11 +677,14 @@ async function launchSpecialist(dept, dir) {
 // Type a task into an agent, file it on the board and remember that an answer is owed.
 const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
 async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0 } = {}) {
-  await typeInto(a.id, prompt + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
-  const issueId = await fileTask({ prompt, from, agent: a, discoveredFrom });
-  pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops });
+  const skill = skillFor(a.dept, prompt);
+  await typeInto(a.id, withSkill(prompt, skill) + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
+  if (skill) logEvent(a, 'tool', `running /${skill}`);
+  const issueId = await fileTask({ prompt: skill ? `/${skill} ${prompt}` : prompt, from, agent: a, discoveredFrom });
+  pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops, skill });
   return issueId;
 }
+function skillNote(a, prompt) { const k = skillFor(a.dept, prompt); return k ? `, running /${k}` : ''; }
 function parseHandoff(text) {
   const m = /HANDOFF:\s*(qa|security|uiux|ui\s*\/?\s*ux|engineering)\s*[—–:-]+\s*(.+)/i.exec(text || '');
   return m ? { dept: DEPT_ALIASES[m[1].toLowerCase().replace(/\s+/g, '')] || 'engineering', task: m[2].trim().slice(0, 1500) } : null;
@@ -713,7 +755,7 @@ async function managerHandle(text) {
       return { result, deliver: async () => {
         const a = await launchSpecialist(dept, dir);
         const issueId = await giveTask(a, req.prompt, text);
-        return { targetId: a.id, message: `${agentName(a)} joined as ${DEPT_NAMES[dept]} in ${path.basename(dir)} and is on it${issueId ? ` (${issueId})` : ''}.` };
+        return { targetId: a.id, message: `${agentName(a)} joined as ${DEPT_NAMES[dept]} in ${path.basename(dir)} and is on it${skillNote(a, req.prompt)}${issueId ? ` (${issueId})` : ''}.` };
       } };
     }
   }
@@ -725,7 +767,7 @@ async function managerHandle(text) {
   result.ok = true; result.action = 'type'; result.message = `On it. Telling ${agentName(target)}…`;
   return { result, deliver: async () => {
     const issueId = await giveTask(target, req.prompt, text);
-    return { targetId: target.id, message: `Told ${agentName(target)} (${DEPT_NAMES[target.dept]})${issueId ? `, filed as ${issueId}` : ''}. I'll bring you the answer when they're done.` };
+    return { targetId: target.id, message: `Told ${agentName(target)} (${DEPT_NAMES[target.dept]}${skillNote(target, req.prompt)})${issueId ? `, filed as ${issueId}` : ''}. I'll bring you the answer when they're done.` };
   } };
 }
 
@@ -783,7 +825,7 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { json(res, 500, { ok: false, message: e.message }); }
     return;
   }
-  if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk });
+  if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk, skills: Object.fromEntries(Object.entries(DEPT_SKILLS).map(([d, ks]) => [d, ks.map((k) => ({ skill: k.skill, what: k.what }))])) });
   if (url.pathname === '/api/issues') return json(res, 200, { ok: true, issues: await refreshIssues(), beads: beadsOk });
   if ((m = url.pathname.match(/^\/api\/agents\/(\d+)\/report$/)) && req.method === 'POST') { // file a report on the current turn right now
     const a = agents.get(Number(m[1])); if (!a) return json(res, 404, { ok: false, message: 'no such agent' });

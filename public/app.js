@@ -212,7 +212,7 @@ function rank(w) { return w === 'permission' ? 0 : w === 'question' ? 1 : w === 
 const taskCanvas = document.createElement('canvas'); taskCanvas.width = 1100; taskCanvas.height = 560;
 const taskTex = new THREE.CanvasTexture(taskCanvas); taskTex.colorSpace = THREE.SRGBColorSpace;
 const taskMaterial = new THREE.MeshStandardMaterial({ map: taskTex, emissiveMap: taskTex, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.4 });
-let lastIssues = []; let beadsOn = false; let taskSig = '';
+let lastIssues = []; let beadsOn = false; let taskSig = ''; let deptSkills = {};
 const PRIO_COLORS = ['#ff4d6d', '#ffb020', '#4ea1ff', '#8b92b8', '#5c6390'];
 function drawTaskBoard(force = false) {
   const sig = JSON.stringify([beadsOn, lastIssues]); if (!force && sig === taskSig) return; taskSig = sig;
@@ -888,6 +888,7 @@ async function loadHistory() {
     for (const r of h.reports || []) addReportRow(r, false);
     for (const m of h.chat || []) logChat(m, { show: false });
     if (h.issues) { lastIssues = h.issues; beadsOn = !!h.beads; drawTaskBoard(); }
+    if (h.skills) deptSkills = h.skills;
     for (const r of (h.reports || []).slice(-TRAY_MAX)) addSheet(r.dept);
   } catch { /* bridge offline */ }
 }
@@ -994,6 +995,7 @@ function renderDetail() {
       <div class="now ${stClass}${w === 'work' ? ' cursor' : ''}">${escapeHtml(nowText)} </div>
       <div class="kv">
         <span>job</span><b><select class="deptSel" title="${escapeHtml(a.deptReason || '')}">${DEPT_ORDER.map((k) => `<option value="${k}"${k === (a.dept || 'engineering') ? ' selected' : ''}>${escapeHtml(DEPTS[k].name)}</option>`).join('')}</select>${a.deptReason ? ` <span style="color:var(--dim)">· ${escapeHtml(a.deptReason.slice(0, 40))}</span>` : ''}</b>
+        ${(deptSkills[a.dept] || []).length ? `<span>skills</span><b>${(deptSkills[a.dept] || []).map((k) => `<span title="${escapeHtml(k.what)}">/${escapeHtml(k.skill)}</span>`).join(' · ')}</b>` : ''}
         <span>folder</span><b>${escapeHtml(a.directoryName || '—')}</b>
         <span>session</span><b>#${a.id}${a.hasTerminal ? ' · terminal' : a.isExternal ? ' · desktop app' : ''}${a.teamName ? ' · team ' + escapeHtml(a.teamName) : ''}</b>
         <span>context</span><b>${a.maxContextTokens ? `${Math.round(a.contextTokens / 1000)}k / ${Math.round(a.maxContextTokens / 1000)}k` : '—'}</b>

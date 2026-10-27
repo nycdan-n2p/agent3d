@@ -42,6 +42,17 @@ The floor manager routes by job. A task with no agent named (`run the test suite
 
 To the right of the lounge is the floor manager's **office** with a report tray. When an agent finishes a turn it picks up a sheet of paper, walks to the office and drops its report (the final message of the turn, plus the desktop app's recap when there is one) on the tray. You get a notice at the bottom of the screen, the `📋 reports` button counts the unread ones, and clicking the tray, the notice or the button opens the inbox, where each report shows its department, the task it answered and the full text. Reports are kept in `reports.jsonl` so they survive a restart. If an agent ends its turn with a question for you it stays at its desk, but the report is filed anyway and marked.
 
+## Skills belong to jobs
+
+The skills installed on this Mac are attached to the job that does that work, and the manager invokes them as slash commands when he hands a task to a specialist: ask Ezra (or anyone in Security) for a security report and he runs `/security-report`; a design task for Felix runs `/frontend-design`; "QA the app" runs `/replay-qa-loop`. Each job's first skill is its default for any in-job task without a named skill. The table is `DEPT_SKILLS` in `server.mjs`, `skills` in the chat lists it, `what can Ezra do` describes one agent, and the agent's screen shows the skills for its job.
+
+| Job | Skills |
+| --- | --- |
+| Security | `/security-report` (default), `/security-review` |
+| UI / UX | `/frontend-design` (default), `/gpt-image-2-style-library` |
+| QA | `/replay-qa-loop` (default), `/code-review` |
+| Engineering | `/codebase-memory`, `/simplify`, `/graphify` (only when the task asks for them) |
+
 ## The task board
 
 If the folder has a Beads database (`bd init`), the floor manager files an issue for every task he hands out: the agent is the assignee, the request is the description, and the issue sits in progress until the agent's report comes back, which the agent appends as a note before closing it. If the agent ends with a question the issue stays open with the note attached. Open issues are drawn on the task board on the left wall, `tasks` in the chat lists them, and each report in the inbox names its issue. Agents launched in a Beads-enabled folder also get `bd prime` through the repo hooks, so they track their own sub-tasks there too.
