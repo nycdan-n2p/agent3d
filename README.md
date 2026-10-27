@@ -49,8 +49,8 @@ The skills installed on this Mac are attached to the job that does that work, an
 | Job | Skills |
 | --- | --- |
 | Security | `/security-report` (default), `/security-review` |
-| UI / UX | `/frontend-design` (default), `/gpt-image-2-style-library` |
-| QA | `/replay-qa-loop` (default), `/code-review` |
+| UI / UX | `/frontend-design` (default), `/lemo-opuscar:lemo-opuscar` (video producers: Vera, Remy, Sol, Juno), `/gpt-image-2-style-library` |
+| QA | `/qa-do` (default; routes to the 50 [qa-skills](https://github.com/petrkindlmann/qa-skills) workflows), `/bug-reproduction`, `/agentic-browser-testing`, `/playwright-automation`, `/exploratory-testing`, `/unit-testing`, `/api-testing`, `/accessibility-testing`, `/visual-testing`, `/performance-testing`, `/test-planning`, `/release-readiness`, `/replay-qa-loop` (say "replay"), `/code-review` |
 | Engineering | `/codebase-memory`, `/simplify`, `/graphify` (only when the task asks for them) |
 
 ## The task board and the queue

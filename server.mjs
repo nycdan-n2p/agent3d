@@ -704,9 +704,21 @@ const DEPT_SKILLS = {
     { skill: 'frontend-design', default: true, what: 'distinctive, production-grade UI: pages, components, layouts, styling', trigger: /\b(design|restyle|style|styling|layout|ui|ux|component|page|landing|dashboard|theme|look|polish|beautif\w*)\b/i },
     { skill: 'gpt-image-2-style-library', what: 'image-generation prompts and visual styles', trigger: /\b(image prompt|image style|generate an? image|illustration|poster|visual style)\b/i },
   ],
-  qa: [
-    { skill: 'replay-qa-loop', what: 'explore the running app, find and root-cause bugs, loop on fixes', trigger: /\b(qa|test the app|run qa|find bugs|bug hunt|explore the app|regression)\b/i },
+  qa: [ // petrkindlmann/qa-skills (50 skills in ~/.claude/skills): the ones below are picked by wording, qa-do routes everything else
     { skill: 'code-review', what: 'review a diff, PR or branch for correctness bugs', trigger: /\b(code review|review (?:the |my |this )?(?:code|diff|pr|branch|changes))\b/i },
+    { skill: 'replay-qa-loop', what: 'Replay QA: record sessions of the running app at qa.replay.io, root-cause bugs, loop on fixes', trigger: /\breplay\b/i },
+    { skill: 'bug-reproduction', what: 'reproduce a reported bug step by step and pin down the cause', trigger: /\b(reproduce|repro|can'?t reproduce|flaky bug|intermittent)\b/i },
+    { skill: 'agentic-browser-testing', what: 'drive the running app in a browser from a plain-language goal and report what breaks', trigger: /\b(in (?:chrome|safari|the browser)|click through|try (?:the|it) in|walk through the app|explore the app|smoke test)\b/i },
+    { skill: 'playwright-automation', what: 'write or fix Playwright end-to-end tests, selectors, fixtures', trigger: /\b(playwright|e2e|end[- ]to[- ]end|selector)\b/i },
+    { skill: 'exploratory-testing', what: 'structured exploratory session: charter, heuristics, notes, findings', trigger: /\b(exploratory|bug hunt|find bugs|hunt for bugs|poke at)\b/i },
+    { skill: 'unit-testing', what: 'write or repair unit tests', trigger: /\b(unit tests?|write tests? for|add tests?|test coverage)\b/i },
+    { skill: 'api-testing', what: 'test HTTP endpoints, contracts and error handling', trigger: /\b(api tests?|endpoints?|test the (?:api|server|bridge))\b/i },
+    { skill: 'accessibility-testing', what: 'accessibility audit: WCAG, keyboard, screen readers', trigger: /\b(accessib\w*|a11y|wcag|screen reader|keyboard nav\w*)\b/i },
+    { skill: 'visual-testing', what: 'visual regression: screenshots compared across changes', trigger: /\b(visual regression|pixel|looks (?:wrong|different|off)|screenshot diff)\b/i },
+    { skill: 'performance-testing', what: 'load, latency and frame-rate testing', trigger: /\b(performance|load test|latency|fps|frame rate|slow)\b/i },
+    { skill: 'test-planning', what: 'turn a change into a test plan with risks and cases', trigger: /\b(test plan|test cases?|what to test|coverage plan)\b/i },
+    { skill: 'release-readiness', what: 'go/no-go check before a release', trigger: /\b(release|ship it|ready to ship|go\/no[- ]go|sign[- ]off)\b/i },
+    { skill: 'qa-do', default: true, what: 'routes any other QA request to the right qa-skills workflow, runs it and reports with evidence', trigger: /\b(qa|test the app|run qa|regression|verify|check that)\b/i },
   ],
   engineering: [
     { skill: 'codebase-memory', what: 'structural questions about the codebase: architecture, callers, dependencies, dead code', trigger: /\b(architecture|who calls|call chain|dependencies|dead code|explore the codebase|structure of)\b/i },
@@ -777,10 +789,21 @@ const queue = { on: process.env.OFFICE_QUEUE !== 'off', // runs from the start; 
 function git(args) { return new Promise((resolve, reject) => execFile('git', ['-C', PROJECT, ...args], { timeout: 30000 }, (err, out, errOut) => err ? reject(new Error(String(errOut || err.message).trim().slice(0, 300))) : resolve(String(out)))); }
 const gitLock = { tail: Promise.resolve() }; // parallel 'git worktree add' runs trip over git's lock files
 function makeWorktree(issueId) { return serial(gitLock, () => makeWorktreeNow(issueId)); }
+function gitIn(dir, args) { return new Promise((resolve, reject) => execFile('git', ['-C', dir, ...args], { timeout: 30000 }, (err, out, errOut) => err ? reject(new Error(String(errOut || err.message).trim().slice(0, 300))) : resolve(String(out).trim()))); }
+// Point an existing worktree at office/<issueId>, fresh from the project's HEAD unless the branch already exists. Only when it is clean.
+async function switchWorktree(dir, issueId) {
+  const branch = `office/${issueId}`;
+  if (await gitIn(dir, ['status', '--porcelain'])) throw new Error(`${path.basename(dir)} has uncommitted changes`);
+  if ((await gitIn(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])) === branch) return branch;
+  const head = await git(['rev-parse', 'HEAD']);
+  try { await gitIn(dir, ['checkout', '-q', '-b', branch, head.trim()]); }
+  catch (e) { if (!/already exists/.test(e.message)) throw e; await gitIn(dir, ['checkout', '-q', branch]); }
+  return branch;
+}
 async function makeWorktreeNow(issueId) {
   const dir = path.join(WORKTREES, issueId); const branch = `office/${issueId}`;
   fs.mkdirSync(WORKTREES, { recursive: true });
-  if (fs.existsSync(path.join(dir, '.git'))) return { dir, branch }; // left from an earlier run: reuse it
+  if (fs.existsSync(path.join(dir, '.git'))) { await switchWorktree(dir, issueId); return { dir, branch }; } // left from an earlier run (maybe reused for another task since): put it back on its branch
   try { await git(['worktree', 'add', '-b', branch, dir, 'HEAD']); }
   catch (e) { if (!/already exists/.test(e.message)) throw e; await git(['worktree', 'add', dir, branch]); }
   return { dir, branch };
@@ -826,21 +849,42 @@ async function dispatchQueue() {
   } finally { queue.busy = false; }
   await Promise.all(starts);
 }
+// A finished queue worker still sitting in its worktree can take the next task of its job instead of a new hire:
+// idle at the prompt, owes nobody an answer, has room left in its context, and its worktree is clean.
+function idleSpecialists(dept) {
+  const busy = new Set(queueRunning().map((w) => w.agentId));
+  return [...agents.values()].filter((a) => a.hasTerminal && !a.parentAgentId && a.dept === dept && !isPlanner(a) && !isVideo(a) && !busy.has(a.id)
+    && a.status !== 'active' && !a.permission && !a.awaitingInput && !a.ask && !playing(a.id) && !pendingReplies.has(a.id)
+    && a.directoryName && fs.existsSync(path.join(WORKTREES, a.directoryName, '.git'))
+    && !(a.maxContextTokens && a.contextTokens > a.maxContextTokens * 0.6))
+    .sort((p, q) => (p.contextTokens || 0) - (q.contextTokens || 0));
+}
+async function reuseSpecialist(dept, issueId) {
+  for (const a of idleSpecialists(dept)) {
+    const dir = path.join(WORKTREES, a.directoryName);
+    try { const branch = await serial(gitLock, () => switchWorktree(dir, issueId)); return { a, dir, branch }; }
+    catch (e) { console.log(`[queue] not reusing ${agentName(a)}: ${e.message}`); }
+  }
+  return null;
+}
 async function dispatchIssue(issue) {
   const dept = (issue.labels || []).map((l) => DEPT_ALIASES[l]).find(Boolean) || classifyText(`${issue.title} ${issue.description || ''}`) || 'engineering';
-  const { dir, branch } = await makeWorktree(issue.id);
-  const a = await launchSpecialist(dept, dir);
-  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue) };
+  const reused = await reuseSpecialist(dept, issue.id);
+  const { dir, branch } = reused || await makeWorktree(issue.id);
+  const a = reused ? reused.a : await launchSpecialist(dept, dir);
+  if (reused) { fx('managerTarget', a.id, { text: '' }); }
+  const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue), reused: !!reused };
   queue.workers.set(issue.id, w); markDirty();
   await bd(['update', issue.id, '--assignee', agentName(a)]).catch(() => {});
-  await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}), working in ${dir} on branch ${branch}.`]).catch(() => {});
-  const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\nYou are working in your own git worktree (${dir}) on branch ${branch}. Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
+  await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}${reused ? ', already on the floor' : ''}), working in ${dir} on branch ${branch}.`]).catch(() => {});
+  const where = reused ? `Your previous task is finished; forget it. Your worktree (${dir}) is now on a fresh branch ${branch}, cut from the project's current HEAD, so start by re-reading any file you touch.` : `You are working in your own git worktree (${dir}) on branch ${branch}.`;
+  const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\n${where} Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
   const skill = skillFor(dept, `${issue.title} ${issue.description || ''}`, { defaultOk: false }); // queued issues only run a skill they name
   await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + HANDOFF_RULE);
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   pendingReplies.set(a.id, { text: `queue: ${issue.title}`, t: Date.now(), issueId: issue.id, hops: 0, skill, queued: true });
   refreshIssues();
-  const message = `${w.plan ? 'Plan' : 'Queue'}: ${agentName(a)} (${DEPT_NAMES[dept]}${skill ? `, running /${skill}` : ''}) picked up ${issue.id} "${issue.title}" in a worktree on ${branch}.`;
+  const message = `${w.plan ? 'Plan' : 'Queue'}: ${agentName(a)} (${DEPT_NAMES[dept]}${skill ? `, running /${skill}` : ''}${reused ? ', was idle' : ', new hire'}) picked up ${issue.id} "${issue.title}" in a worktree on ${branch}.`;
   logChat('manager', 'floor manager', message, { ok: true, action: 'queue' });
   fx('managerSay', a.id, { text: `${issue.id}: ${issue.title}`, message, ok: true, action: 'queue', pending: false });
   const pl = w.plan && planOf(issue.id); if (pl) { const part = pl.parts.find((x) => x.id === issue.id); if (part) { part.by = agentName(a); part.branch = branch; } }
@@ -1019,6 +1063,18 @@ async function handleDeskReport(sec, r, d) {
 }
 try { for (const d of fs.readdirSync(WORKTREES)) if (fs.existsSync(path.join(WORKTREES, d, '.git'))) applyPolicy(path.join(WORKTREES, d)); } catch { /* no worktrees yet */ }
 setInterval(() => { for (const a of agents.values()) if (deskable(a)) deskRoute(a).catch((e) => console.log('[desk]', e.message)); }, 3000);
+// Office-hired agents also go home by themselves once they've sat idle this long with nothing owed,
+// so finished queue workers don't pile up. OFFICE_IDLE_HOME_MIN=0 turns it off.
+const IDLE_HOME_MS = Math.max(0, Number(process.env.OFFICE_IDLE_HOME_MIN ?? 10)) * 60000;
+function sendIdleHome() {
+  if (!IDLE_HOME_MS || !upstream.privileged) return;
+  const going = [...agents.values()].filter((a) => a.hasTerminal && !pendingReplies.has(a.id) && Date.now() - a.lastEvent > IDLE_HOME_MS && idleForHome(a));
+  if (!going.length) return;
+  for (const a of going) sendUpstream({ type: 'closeAgent', id: a.id });
+  const message = `Sent ${going.map(agentName).join(', ')} home after ${IDLE_HOME_MS / 60000} idle minutes.`;
+  console.log('[office]', message); logChat('manager', 'floor manager', message, { ok: true });
+}
+setInterval(sendIdleHome, 60000);
 // ---------- planning: a big request goes to a planner, who splits it into parts for the specialists ----------
 // The manager takes anything that reads as more than one job (or "plan: <task>") to a planner, a Claude
 // session like the others. The planner reads the code, changes nothing, and answers with a PLAN block.
