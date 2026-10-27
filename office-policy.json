@@ -1,0 +1,39 @@
+{
+  "_about": "The office permission policy. `allow` and `deny` are Claude Code permission rules the floor manager writes into .claude/settings.local.json of every folder he launches an agent in (worktrees included), so those commands never prompt. Anything that still prompts goes to the security desk: a Security specialist reads `desk` and answers in the agent's terminal. Matches of `desk.ask_daniel_patterns` skip the desk and come straight to you. Edit freely; the bridge re-reads this file when it changes.",
+  "allow": [
+    "Read", "Edit", "Write", "Grep", "Glob", "LS",
+    "Bash(bd:*)",
+    "Bash(node:*)", "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git branch:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(git worktree list:*)", "Bash(git merge:*)", "Bash(git stash:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(echo:*)", "Bash(pwd)", "Bash(which:*)", "Bash(diff:*)", "Bash(python3 -c:*)"
+  ],
+  "deny": [
+    "Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(git rebase:*)", "Bash(git push --force:*)",
+    "Bash(rm -rf:*)", "Bash(sudo:*)",
+    "Bash(curl:*)", "Bash(wget:*)",
+    "Read(./.env)", "Read(./.env.*)", "Read(~/.ssh/**)", "Read(~/.aws/**)"
+  ],
+  "desk": {
+    "approve": [
+      "Beads commands (bd ...), including notes and closes",
+      "running this project's scripts, tests, linters and builds with node, npm or npx",
+      "git commands that stay local and do not rewrite history: status, diff, log, add, commit, merge, stash, worktree list",
+      "reading, creating, editing and moving files inside the agent's own folder or worktree",
+      "harmless shell inspection: ls, cat, grep, find, wc, diff, head, tail, which"
+    ],
+    "refuse": [
+      "git push, force pushes, git reset --hard, rebases, deleting branches that are not the agent's own",
+      "deleting anything outside the agent's own folder, rm -rf, emptying directories",
+      "sudo, changing system or security settings, installing software globally, editing shell profiles",
+      "sending anything off the machine: curl or wget to external hosts, email, chat messages, posting, uploads",
+      "reading or writing secrets: .env files, keys, tokens, credentials, keychains, ~/.ssh, ~/.aws",
+      "anything that spends money or is hard to undo"
+    ],
+    "ask_daniel": [
+      "anything the lists above do not clearly cover",
+      "installing new project dependencies",
+      "commands that touch files outside the agent's own folder"
+    ],
+    "ask_daniel_patterns": ["git push", "rm -rf", "sudo ", "curl ", "wget ", ".env", "ssh ", "scp ", "brew install", "npm install -g", "pip install", "launchctl", "osascript", "killall", "kill -9"]
+  }
+}

@@ -246,6 +246,8 @@ function drawTaskBoard(force = false) {
 }
 drawTaskBoard(true);
 setInterval(() => drawBoard(lastAgents), 1000);
+// wall boards you can click to look at up close: { mesh, w, h, normal, maxDist } (filled in by buildRoom)
+const boards = [];
 
 function buildRoom() {
   // floor: two-tone tiles
@@ -301,15 +303,17 @@ function buildRoom() {
   const frame = new THREE.Mesh(new THREE.BoxGeometry(18.4, 4.4, 0.25), mat(0x0d0f20, { metalness: 0.4, roughness: 0.5 })); frame.position.set(2, 4.0, -ROOM.d / 2 + 2.15); scene.add(frame);
   const win = new THREE.Mesh(new THREE.PlaneGeometry(18, 4.0), boardMaterial);
   win.position.set(2, 4.0, -ROOM.d / 2 + 2.29); scene.add(win);
+  boards.push({ mesh: win, w: 18, h: 4.0, normal: new THREE.Vector3(0, 0, 1), maxDist: MEZZ.z0 - 0.5 - win.position.z }); // stay in front of the mezzanine
   // task board on the left wall, by the Engineering bay
   const tframe = new THREE.Mesh(new THREE.BoxGeometry(0.25, 4.2, 8.2), mat(0x0d0f20, { metalness: 0.4, roughness: 0.5 })); tframe.position.set(-ROOM.w / 2 + 0.33, 3.6, -3.9); scene.add(tframe);
   const tboard = new THREE.Mesh(new THREE.PlaneGeometry(7.9, 4.0), taskMaterial); tboard.rotation.y = Math.PI / 2; tboard.position.set(-ROOM.w / 2 + 0.47, 3.6, -3.9); scene.add(tboard);
+  boards.push({ mesh: tboard, w: 7.9, h: 4.0, normal: new THREE.Vector3(1, 0, 0) });
   // baseboard neon strip
   const strip = new THREE.Mesh(new THREE.BoxGeometry(ROOM.w, 0.08, 0.08), new THREE.MeshStandardMaterial({ color: 0x7c5cff, emissive: 0x7c5cff, emissiveIntensity: 2.5 }));
   strip.position.set(0, 0.06, -ROOM.d / 2 + 2.25); scene.add(strip);
   const strip2 = strip.clone(); strip2.rotation.y = Math.PI / 2; strip2.position.set(-ROOM.w / 2 + 0.25, 0.06, 2); scene.add(strip2);
   // lounge: couch, coffee machine, plants, rug
-  const rug = new THREE.Mesh(new THREE.CircleGeometry(4.2, 40), mat(0x8a4b8f, { roughness: 1 })); rug.rotation.x = -Math.PI / 2; rug.position.set(0, 0.01, 8); rug.receiveShadow = true; scene.add(rug);
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(4.2, 40), mat(0xb5654a, { roughness: 1 })); rug.rotation.x = -Math.PI / 2; rug.position.set(0, 0.01, 8); rug.receiveShadow = true; scene.add(rug);
   scene.add(couch(-3.5, 9.3, 0), couch(3.5, 9.3, 0));
   scene.add(coffeeMachine(-10, 7.5), plant(5.6, 10.2, 1.2), plant(-10.5, 10, 0.9), plant(14.3, -10.2, 1.3));
   // wall clock-ish sign
@@ -514,17 +518,81 @@ function buildMezzanine() {
   }
   const side = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, MEZZ.z0 - 6), glass); side.position.set(sx + 1.13, MEZZ.y * 0.5 + 0.55, (6 + MEZZ.z0) / 2); side.rotation.x = 0; g.add(side);
   const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, Math.hypot(MEZZ.y, MEZZ.z0 - 6)), mat(0x3a3f6b, { metalness: 0.5 })); hand.position.set(sx + 1.13, MEZZ.y / 2 + 1.05, (6 + MEZZ.z0) / 2); hand.rotation.x = -Math.atan2(MEZZ.y, MEZZ.z0 - 6); g.add(hand);
-  // your desk, facing the floor, with a reading lamp, a plant and a sign
+  // your desk, facing the floor, with a plant and a sign
   const desk = buildDesk(MEZZ.deskX, MEZZ.deskZ, false); desk.group.position.y = MEZZ.y; // chair at the back, monitor toward the railing: you look over the floor
-  drawScreen(desk.screen, 'think', 'AGENT OFFICE'); desk.screen.userData.key = 'you';
-  const lamp = new THREE.PointLight(0xffe2b8, 3, 10, 1.6); lamp.position.set(MEZZ.deskX, MEZZ.y + 2.4, MEZZ.deskZ + 1.5); g.add(lamp);
-  const bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0xffe2b8, emissive: 0xffe2b8, emissiveIntensity: 0.8 })); bulb.position.set(MEZZ.deskX, ROOM.h - 0.8, MEZZ.deskZ); g.add(bulb);
+  setupYourScreen(desk);
   const p1 = plant(-4.5, MEZZ.z1 - 0.9, 1.1); p1.position.y = MEZZ.y; g.add(p1);
   const p2 = plant(4.5, MEZZ.z1 - 0.9, 1.0); p2.position.y = MEZZ.y; g.add(p2);
   const sofa = couch(9, MEZZ.z1 - 1.2, 0); sofa.position.y = MEZZ.y; g.add(sofa);
-  const sign = textSprite('YOUR OFFICE', { size: 54, color: '#111', bg: 'rgba(255,176,32,0.92)' }); sign.position.set(MEZZ.deskX, MEZZ.y + 3.0, MEZZ.deskZ - 0.6); sign.scale.set(4.2, 0.66, 1); g.add(sign);
+  // the sign hangs over the top of the stairs, off to the side, so it never sits between you and the floor
+  const sign = textSprite('YOUR OFFICE', { size: 54, color: '#111', bg: 'rgba(255,176,32,0.92)' }); sign.position.set(-ROOM.w / 2 + 1.35, MEZZ.y + 2.1, MEZZ.z0 + 0.9); sign.scale.set(2.8, 0.44, 1); g.add(sign);
   const rug = new THREE.Mesh(new THREE.CircleGeometry(2.4, 32), mat(0x8a4b8f, { roughness: 1 })); rug.rotation.x = -Math.PI / 2; rug.position.set(MEZZ.deskX, MEZZ.y + 0.05, MEZZ.deskZ + 0.6); rug.receiveShadow = true; g.add(rug);
 }
+// ---------- your desk screen: who needs you, and the day at a glance ----------
+// The monitor on the balcony desk faces the camera, so it works as your inbox: every agent waiting
+// on an answer or an approval, oldest first, and a strip with today's numbers. Click a row to jump.
+let yourScreen = null;
+function setupYourScreen(desk) {
+  const c = document.createElement('canvas'); c.width = 800; c.height = 488;
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+  const m = new THREE.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.95, roughness: 0.3 });
+  let mesh = null; desk.group.traverse((o) => { if (o.isMesh && o.material === desk.screen) mesh = o; });
+  mesh.material = m; mesh.userData.yourScreen = true;
+  yourScreen = { mesh, canvas: c, tex, rows: [], sig: '' }; // first drawn by the interval, once the agent state exists
+}
+function askText(a) {
+  if (a.ask?.kind === 'question') return a.ask.question;
+  if (a.ask?.kind === 'permission') return `may I run ${prettyTool(a.ask.tool)}${a.ask.summary ? ': ' + a.ask.summary : ''}?`;
+  return a.permission ? 'needs your approval' : 'asked you a question';
+}
+function drawYourScreen(force = false) {
+  if (!yourScreen) return;
+  const waiting = lastAgents.map((a) => ({ a, av: avatars.get(a.id) })).filter((r) => r.av && (r.av.wants() === 'permission' || r.av.wants() === 'question'))
+    .sort((p, q) => (q.a.permission - p.a.permission) || (p.a.lastEvent - q.a.lastEvent));
+  const working = lastAgents.filter((a) => avatars.get(a.id)?.wants() === 'work').length;
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const reportsToday = [...reportsById.values()].filter((r) => r.t >= dayStart.getTime()).length;
+  const q = lastQueue;
+  const sig = JSON.stringify([waiting.map((r) => [r.a.id, askText(r.a).slice(0, 60), Math.floor((Date.now() - r.a.lastEvent) / 30000)]), working, reportsToday, lastIssues.length, q && [q.on, q.running, q.limit], lastAgents.length]);
+  if (!force && sig === yourScreen.sig) return; yourScreen.sig = sig;
+  const c = yourScreen.canvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
+  ctx.fillStyle = '#07080f'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = waiting.length ? '#ff4d6d' : '#39d98a'; ctx.fillRect(0, 0, W, 6);
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  ctx.font = `bold 30px ${mono}`; ctx.fillStyle = '#e8ecff'; ctx.fillText('INBOX', 24, 22);
+  ctx.font = `22px ${mono}`; ctx.fillStyle = waiting.length ? '#ff4d6d' : '#8b92b8';
+  ctx.fillText(waiting.length ? `${waiting.length} waiting on you` : 'nobody is waiting on you', 136, 28);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#5c6390'; ctx.fillText(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), W - 24, 28); ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(24, 64, W - 48, 2);
+  yourScreen.rows = [];
+  const rowH = 66, top = 76, max = 5;
+  waiting.slice(0, max).forEach(({ a, av }, i) => {
+    const y = top + i * rowH;
+    ctx.fillStyle = a.permission ? 'rgba(255,77,109,0.10)' : 'rgba(255,176,32,0.10)'; roundRect(ctx, 24, y, W - 48, rowH - 8, 10); ctx.fill();
+    ctx.fillStyle = a.permission ? '#ff4d6d' : '#ffb020'; ctx.fillRect(24, y, 6, rowH - 8);
+    ctx.fillStyle = '#' + av.color.getHexString(); roundRect(ctx, 44, y + 12, 16, 16, 4); ctx.fill();
+    ctx.fillStyle = '#e8ecff'; ctx.font = `bold 22px ${mono}`; ctx.fillText(av.name().slice(0, 14), 70, y + 9);
+    ctx.fillStyle = deptHex(a.dept); ctx.font = `bold 14px ${mono}`; ctx.fillText(deptOf(a.dept).name.toUpperCase(), 70 + ctx.measureText(av.name().slice(0, 14)).width * 1.6 + 16, y + 14);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#8b92b8'; ctx.font = `16px ${mono}`; ctx.fillText(`${ago(a.lastEvent)} · ${a.hasTerminal ? 'click to answer' : 'desktop app'}`, W - 36, y + 12); ctx.textAlign = 'left';
+    ctx.fillStyle = a.permission ? '#ffb8c4' : '#ffe0a8'; ctx.font = `19px ${mono}`;
+    const text = askText(a).replace(/\s+/g, ' '); let line = text; while (ctx.measureText(line).width > W - 110 && line.length > 4) line = line.slice(0, -4); if (line !== text) line = line.slice(0, -1) + '…';
+    ctx.fillText(line, 70, y + 36);
+    yourScreen.rows.push({ id: a.id, y0: y, y1: y + rowH - 8 });
+  });
+  if (waiting.length > max) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${waiting.length - max} more in the roster`, 24, top + max * rowH); }
+  if (!waiting.length) { ctx.fillStyle = '#39d98a'; ctx.font = `bold 44px ${mono}`; ctx.fillText('✓ all clear', 24, 150); ctx.fillStyle = '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(`${working} working · ${lastAgents.length - working} idle or done`, 24, 206); }
+  // the day at a glance
+  const sy = H - 78; ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(0, sy, W, 78);
+  ctx.fillStyle = '#ffb020'; ctx.fillRect(0, sy, W, 2);
+  const tiles = [['WORKING', working, '#39d98a'], ['REPORTS TODAY', reportsToday, '#ffb020'], ['OPEN TASKS', lastIssues.length, '#4ea1ff'], ['QUEUE', q ? (q.on ? `${q.running}/${q.limit}` : 'off') : '—', q?.on ? '#39d98a' : '#8b92b8']];
+  tiles.forEach(([label, n, col], i) => {
+    const x = 24 + i * (W - 48) / 4;
+    ctx.fillStyle = col; ctx.font = `bold 34px ${mono}`; ctx.fillText(String(n), x, sy + 12);
+    ctx.fillStyle = '#8b92b8'; ctx.font = `bold 13px ${mono}`; ctx.fillText(label, x, sy + 54);
+  });
+  yourScreen.tex.needsUpdate = true;
+}
+setInterval(() => drawYourScreen(), 1000);
 buildMezzanine();
 function claimDesk(id, dept) {
   let d = desks.find((d) => d.agentId === id && (!dept || d.dept === dept)); if (d) return d;
@@ -696,7 +764,8 @@ class Avatar {
     // --- labels + bubble
     updateSprite(this.nameSprite, a.role === 'planner' ? `${this.name()} · planner` : this.name(), { size: 44, color: a.role === 'planner' ? '#ffb020' : '#e8ecff', bg: 'rgba(12,14,30,0.75)' });
     let status = ''; let statusColor = '#39d98a';
-    if (w === 'permission' || w === 'question') { status = a.ask?.kind === 'question' ? a.ask.question.slice(0, 40) : a.ask?.kind === 'permission' ? `may I run ${prettyTool(a.ask.tool)}?` : 'needs your approval'; statusColor = '#ff4d6d'; }
+    if ((w === 'permission' || w === 'question') && a.desk && a.ask?.kind === 'permission') { status = `security desk: ${a.desk.name}`; statusColor = '#ffb020'; }
+    else if (w === 'permission' || w === 'question') { status = a.ask?.kind === 'question' ? a.ask.question.slice(0, 40) : a.ask?.kind === 'permission' ? `may I run ${prettyTool(a.ask.tool)}?` : 'needs your approval'; statusColor = '#ff4d6d'; }
     else if (typing && this.mode === 'play') { const t = tools[tools.length - 1]; const lm = /lego\.mjs"?\s+\d+\s+(\w+)/.exec(t.status || ''); status = LEGO_ACTIONS[lm?.[1]] || 'playing'; statusColor = '#39d98a'; }
     else if (typing) { const t = tools[tools.length - 1]; status = (t.status || t.toolName).replace(/mcp__\S+/g, (m) => prettyTool(m)).slice(0, 36); statusColor = '#' + new THREE.Color(TOOL_COLORS[toolKind(t.toolName)]).getHexString(); }
     else if (w === 'work') { status = 'thinking' + '.'.repeat(1 + (Math.floor(this.t * 2) % 3)); statusColor = '#d6dcff'; }
@@ -976,6 +1045,7 @@ async function loadHistory() {
 const revealSign = textSprite('', { size: 34, color: '#fff', bg: 'rgba(12,14,30,0.8)' }); revealSign.position.set(LEGO.x, 2.6, LEGO.z); revealSign.visible = false; scene.add(revealSign);
 let reveal = null; let revealText = '';
 function startReveal() {
+  if (boardZoom) return; // you're reading a board: don't swing the camera away
   followId = null; renderRoster(lastAgents);
   reveal = { until: Date.now() + 14000, angle: Math.atan2(camera.position.x - LEGO.x, camera.position.z - LEGO.z), nextConfetti: Date.now() + 1200, wasAutoRotate: controls.autoRotate };
   controls.autoRotate = false; revealText = ''; revealSign.visible = true; updateRevealSign();
@@ -989,6 +1059,23 @@ function updateRevealSign() {
 }
 function endReveal() { if (!reveal) return; controls.autoRotate = reveal.wasAutoRotate; reveal = null; revealSign.visible = false; }
 controls.addEventListener('start', endReveal); // any drag or scroll hands the camera back
+// ---------- board zoom: click a wall board and the camera squares up to it ----------
+const BOARD_FILL = 0.5; // share of the screen the board takes, on whichever side runs out first
+let boardZoom = null;
+function zoomPose(b) {
+  const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  let d = Math.max(b.h / (2 * BOARD_FILL * tanHalf), b.w / (2 * BOARD_FILL * tanHalf * camera.aspect));
+  if (b.maxDist) d = Math.min(d, b.maxDist);
+  const target = b.mesh.getWorldPosition(new THREE.Vector3());
+  return { target, pos: target.clone().addScaledVector(b.normal, d) };
+}
+function startBoardZoom(b) {
+  endReveal(); followId = null; renderRoster(lastAgents);
+  boardZoom = { board: b, wasAutoRotate: boardZoom ? boardZoom.wasAutoRotate : controls.autoRotate };
+  controls.autoRotate = false; controls.maxPolarAngle = Math.PI / 2; // the board is at eye level: let the camera look straight at it
+}
+function endBoardZoom() { if (!boardZoom) return; controls.autoRotate = boardZoom.wasAutoRotate; controls.maxPolarAngle = Math.PI * 0.49; boardZoom = null; }
+controls.addEventListener('start', endBoardZoom);
 let rosterSig = '';
 function renderRoster(agents) {
   const rows = [];
@@ -1065,11 +1152,12 @@ function renderDetail() {
         <button type="button" data-answer="other">✎ other…</button></div></div>`;
     } else {
       askHtml = `<div class="ask perm"><div class="askTitle">⚠ ${escapeHtml(av.name())} wants to run <b>${escapeHtml(prettyTool(a.ask.tool))}</b></div>
+        ${a.desk ? `<div class="askQ" style="color:#ffb020">🛡 at the security desk: ${escapeHtml(a.desk.name)} is checking it against the office policy. You can still answer yourself.</div>` : ''}
         ${a.ask.description ? `<div class="askQ">${escapeHtml(a.ask.description)}</div>` : ''}<pre class="askCode">${escapeHtml(a.ask.summary || '')}</pre>
         <div class="askOpts"><button type="button" data-answer="1" class="yes">✓ allow</button><button type="button" data-answer="2">allow &amp; don't ask again</button><button type="button" data-answer="esc" class="no">✕ deny</button></div></div>`;
     }
   } else if (needsYou) {
-    askHtml = `<div class="ask"><div class="askTitle">⚠ ${escapeHtml(av.name())} is waiting on you</div><div class="askQ">${a.hasTerminal ? 'Reading the prompt from the transcript…' : 'This is a desktop-app session: answer it in that window.'}</div></div>`;
+    askHtml = `<div class="ask"><div class="askTitle">⚠ ${escapeHtml(av.name())} is waiting on you</div><div class="askQ">${a.hasTerminal ? 'Reading the prompt from the transcript… if nothing shows up in a few seconds, they are just idle at the prompt.' : 'This is a desktop-app session: answer it in that window.'}</div></div>`;
   }
   const html = askHtml + `
       <div class="now ${stClass}${w === 'work' ? ' cursor' : ''}">${escapeHtml(nowText)} </div>
@@ -1130,9 +1218,9 @@ $('#btnOrbit').onclick = (e) => { controls.autoRotate = !controls.autoRotate; e.
 $('#btnSound').onclick = (e) => { soundOn = !soundOn; e.target.classList.toggle('on', soundOn); if (soundOn) chime(); };
 $('#btnNight').onclick = (e) => { nightTarget = nightTarget ? 0 : 1; e.target.textContent = nightTarget ? 'night' : 'day'; e.target.classList.toggle('on', !!nightTarget); };
 $('#btnNight').classList.add('on');
-$('#btnReset').onclick = () => { endReveal(); followId = null; camera.position.copy(HOME); controls.target.copy(HOME_TARGET); renderRoster(lastAgents); };
-$('#btnOverview').onclick = () => { endReveal(); followId = null; camera.position.copy(OVERVIEW); controls.target.copy(OVERVIEW_TARGET); renderRoster(lastAgents); };
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { endReveal(); followId = null; renderRoster(lastAgents); } });
+$('#btnReset').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(HOME); controls.target.copy(HOME_TARGET); renderRoster(lastAgents); };
+$('#btnOverview').onclick = () => { endReveal(); endBoardZoom(); followId = null; camera.position.copy(OVERVIEW); controls.target.copy(OVERVIEW_TARGET); renderRoster(lastAgents); };
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { endReveal(); endBoardZoom(); followId = null; renderRoster(lastAgents); } });
 // click to follow
 const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
@@ -1140,16 +1228,22 @@ let hoverAt = 0;
 renderer.domElement.addEventListener('pointermove', (e) => {
   if (e.buttons || performance.now() - hoverAt < 80) return; hoverAt = performance.now();
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera);
-  renderer.domElement.style.cursor = ray.intersectObjects(binParts, true).length ? 'pointer' : '';
+  renderer.domElement.style.cursor = ray.intersectObjects([...binParts, ...boards.map((b) => b.mesh)], true).length ? 'pointer' : '';
 });
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera);
+  if (yourScreen) { // a row on your desk screen jumps to that agent, with its answer buttons open
+    const h = ray.intersectObject(yourScreen.mesh)[0];
+    if (h && h.uv) { const y = (1 - h.uv.y) * yourScreen.canvas.height; const row = yourScreen.rows.find((r) => y >= r.y0 && y <= r.y1); if (row && avatars.has(row.id)) { endReveal(); followId = row.id; renderRoster(lastAgents); renderDetail(); } return; }
+  }
   if (trayHit && ray.intersectObject(trayHit).length) { openReports(); return; } // the report tray opens the inbox
   const hits = ray.intersectObjects([...avatars.values()].map((a) => a.group), true);
   const hit = hits.find((h) => { let o = h.object; while (o && o.userData.avatarId === undefined) o = o.parent; return o; });
   const binHit = ray.intersectObjects(binParts, true)[0];
   if (binHit && (!hit || binHit.distance < hit.distance)) { reportsPanel.classList.contains('show') ? closeReports() : openReports(); return; }
+  const boardHit = ray.intersectObjects(boards.map((b) => b.mesh))[0];
+  if (boardHit && (!hit || boardHit.distance < hit.distance)) { const b = boards.find((x) => x.mesh === boardHit.object); boardZoom?.board === b ? endBoardZoom() : startBoardZoom(b); return; } // click again to step back
   if (hit) { let o = hit.object; while (o && o.userData.avatarId === undefined) o = o.parent; followId = followId === o.userData.avatarId ? null : o.userData.avatarId; renderRoster(lastAgents); }
 });
 
@@ -1175,6 +1269,8 @@ function applyState(s) {
   renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
 }
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
+window.__officeFake = (id, kind) => { const av = avatars.get(id); if (!av) return 'no agent'; av.data.permission = kind === 'permission'; av.data.awaitingInput = kind === 'question'; av.data.ask = kind === 'question' ? { kind: 'question', question: 'Fake: which option should I take for the fake test?' } : kind === 'permission' ? { kind: 'permission', tool: 'Bash', summary: 'rm -rf build' } : null; av.decide(); drawYourScreen(true); return 'ok'; }; // debug hook
+window.__officeRowPixel = (i) => { const r = yourScreen?.rows[i]; if (!r) return null; const c = yourScreen.canvas; const v = 1 - ((r.y0 + r.y1) / 2) / c.height; const p = new THREE.Vector3(0, (v - 0.5) * 0.7, 0); yourScreen.mesh.localToWorld(p).project(camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight]; }; // debug hook
 window.__officeCam = (p, t) => { endReveal(); followId = null; camera.position.set(...p); controls.target.set(...t); }; // debug hook: place the camera
 window.__officeDebug = () => ({ huddle: huddle ? { i: huddle.i, members: [...huddle.slots.keys()] } : null, manager: manager ? { huddling: manager.huddling, bubble: manager.bubble.visible, pos: manager.pos.toArray().map((v) => +v.toFixed(1)), path: manager.path.length, task: !!manager.task } : null, issues: lastIssues.length, beads: beadsOn, reveal: reveal ? { msLeft: reveal.until - Date.now(), angle: reveal.angle } : null, cam: camera.position.toArray().map((v) => +v.toFixed(2)), target: controls.target.toArray().map((v) => +v.toFixed(2)), followId, avatars: [...avatars.values()].map((a) => ({ id: a.id, name: a.name(), mode: a.mode, dept: a.dept(), desk: a.desk.dept, pending: a.pendingReports.length, pos: a.pos.toArray().map((v) => +v.toFixed(1)), path: a.path.length })) });
 function applyFx(f) {
@@ -1266,7 +1362,12 @@ function frame() {
   updateParticles(dt);
   if (legoDirty || legoAnimating) { legoDirty = false; rebuildLego(now); }
   if (reveal && (followId !== null || now > reveal.until)) endReveal();
-  if (reveal) {
+  if (boardZoom && followId !== null) endBoardZoom();
+  if (boardZoom) {
+    const z = zoomPose(boardZoom.board); // recomputed each frame so a window resize refits the board
+    controls.target.lerp(z.target, 1 - Math.pow(0.002, dt));
+    camera.position.lerp(z.pos, 1 - Math.pow(0.01, dt));
+  } else if (reveal) {
     reveal.angle += dt * 0.4;
     followTarget.set(LEGO.x, 1.4, LEGO.z);
     controls.target.lerp(followTarget, 1 - Math.pow(0.002, dt));

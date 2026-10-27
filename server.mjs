@@ -18,6 +18,8 @@ const PORT = Number(process.env.PORT || 4900);
 const LEGO_CLI = path.join(__dirname, 'lego.mjs');
 const PLAYROOM = path.join(__dirname, 'playroom');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// one at a time: serial(lock, fn) runs fn after everything queued on the same lock has finished
+const serial = (lock, fn) => { const run = lock.tail.then(fn, fn); lock.tail = run.catch(() => {}); return run; };
 
 // ---------- discover the pixel-agents server (port + token) ----------
 function discover() {
@@ -138,15 +140,16 @@ function lastToolUse(a) {
     const fd = fs.openSync(a.jsonlFile, 'r'); const size = fs.fstatSync(fd).size; const len = Math.min(size, 400000);
     const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd); text = buf.toString('utf8');
   } catch { return null; }
-  const lines = text.split('\n');
+  const lines = text.split('\n'); const resolved = new Set(); // tool_use ids that already got their tool_result
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]; if (!line.includes('"tool_use"') && !line.includes('"user"')) continue;
     let rec; try { rec = JSON.parse(line); } catch { continue; }
     if (isHumanTurn(rec)) return null; // reached the prompt that started this turn
+    if (rec.type === 'user' && Array.isArray(rec.message?.content)) { for (const b of rec.message.content) if (b.type === 'tool_result' && b.tool_use_id) resolved.add(b.tool_use_id); continue; }
     if (rec.type !== 'assistant' || rec.isSidechain) continue;
     const content = rec.message?.content; if (!Array.isArray(content)) continue;
     const uses = content.filter((b) => b.type === 'tool_use'); if (!uses.length) continue;
-    return uses[uses.length - 1];
+    const last = uses[uses.length - 1]; return { ...last, resolved: resolved.has(last.id) };
   }
   return null;
 }
@@ -165,10 +168,19 @@ function askFromToolUse(found) {
   ask.toolUseId = found.id;
   return ask;
 }
-function refreshAsk(a) {
+function refreshAsk(a, { settle = false } = {}) {
   const wants = a.permission || a.awaitingInput;
-  if (!wants) { if (a.ask) { a.ask = null; markDirty(); } return; }
-  const found = lastToolUse(a); if (!found) return;
+  if (!wants) { if (a.ask) { a.ask = null; markDirty(); } a.askSince = 0; return; }
+  if (!a.askSince) a.askSince = Date.now();
+  const found = lastToolUse(a);
+  // Pixel Agents says "waiting for input" after every turn that ends at the prompt. Only a tool call
+  // still without its result (a permission prompt or AskUserQuestion) or a wrap-up question is a real
+  // ask; anything else is an idle agent, so stop showing it as waiting on you.
+  const real = found && (!found.resolved || (WRAP_UP_TOOL.test(found.name) && found.input?.ask));
+  if (!real) {
+    if (settle && !a.permission && a.jsonlFile && Date.now() - a.askSince > 2500) { a.awaitingInput = false; a.ask = null; a.askSince = 0; markDirty(); }
+    return;
+  }
   const ask = askFromToolUse(found);
   if (JSON.stringify(a.ask) !== JSON.stringify(ask)) { a.ask = ask; markDirty(); }
 }
@@ -180,7 +192,7 @@ function detectWrapUpAsk(a) {
   if (!found || !WRAP_UP_TOOL.test(found.name) || !found.input?.ask) return false;
   a.awaitingInput = true; return true;
 }
-setInterval(() => { for (const a of agents.values()) if (a.permission || a.awaitingInput) refreshAsk(a); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'requestDiagnostics' })); }, 2500);
+setInterval(() => { for (const a of agents.values()) if (a.permission || a.awaitingInput) refreshAsk(a, { settle: true }); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'requestDiagnostics' })); }, 2500);
 
 // ---------- departments: where in the office is this agent working right now? ----------
 // Each tool call (and the prompt that started the turn) is matched against the rules; the first
@@ -310,6 +322,7 @@ function captureReport(a, attempt = 0) {
   if (reply) { r.issueId = reply.issueId || null; const w = reply.issueId && queue.workers.get(reply.issueId); if (w && w.agentId === a.id) { r.branch = w.branch; if (!r.asked) { w.done = true; markDirty(); setTimeout(dispatchQueue, 2000); } } logChat('agent', r.name, r.text || r.recap, { agentId: a.id, dept: a.dept, reportId: r.id, issueId: r.issueId }); settleTask(reply.issueId, r).then(() => { if (!r.asked) planProgress(reply.issueId, r); }); }
   fx('report', a.id, { report: r });
   if (reply && reply.plan) { if (r.asked) pendingReplies.set(a.id, reply); else handlePlanReport(a, r, reply.plan).catch((e) => console.log('[plan]', e.message)); return; }
+  if (reply && reply.desk) { if (r.asked) pendingReplies.set(a.id, reply); else handleDeskReport(a, r, reply.desk).catch((e) => console.log('[desk]', e.message)); return; }
   const h = !r.asked && reply && hops < MAX_HOPS && parseHandoff(r.text);
   if (h && h.dept !== a.dept) dispatchHandoff(a, r, h, hops + 1);
   else if (h) logChat('manager', 'floor manager', `${r.name} asked for a ${DEPT_NAMES[h.dept]} handoff, but that's their own job: ignored.`, { ok: false });
@@ -508,8 +521,11 @@ function parseRequest(text) {
   for (const a of agents.values()) { const n = agentName(a).toLowerCase(); if (n.length > 2 && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(t)) return { kind: 'agent', name: n, prompt: t }; }
   return { kind: 'any', prompt: t };
 }
-async function launchAgent(dir) {
+const launchLock = { tail: Promise.resolve() }; // a new agent is matched by folder name, so launches can't overlap
+function launchAgent(dir) { return serial(launchLock, () => launchAgentNow(dir)); }
+async function launchAgentNow(dir) {
   if (!upstream.privileged) throw new Error('bridge is read-only: no token found in ~/.pixel-agents/servers');
+  applyPolicy(dir); // what the office policy pre-approves never prompts in this folder
   const base = path.basename(dir);
   const created = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { listeners.delete(l); reject(new Error('pixel-agents did not report a new agent')); }, 8000);
@@ -518,7 +534,7 @@ async function launchAgent(dir) {
   });
   if (!sendUpstream({ type: 'launchAgent', directoryPath: dir })) throw new Error('not connected to pixel-agents');
   const id = await created;
-  const a = ensure(id); a.hasTerminal = true;
+  const a = ensure(id); a.hasTerminal = true; a.hiredAt = Date.now();
   // terminalSessionOpened arrives right after; make sure we attach
   const t0 = Date.now(); while (!terminals.has(id) && Date.now() - t0 < 3000) { attachTerminal(id); await sleep(200); }
   return id;
@@ -601,6 +617,7 @@ function statusAnswer(text) {
     if (!issues.length) return 'The board is clear: no open tasks.';
     return `${issues.length} open:\n` + issues.slice(0, 12).map((i) => `${i.id} P${i.priority} ${i.status === 'in_progress' ? '◐' : '○'} ${i.title}${i.assignee ? ` (${i.assignee})` : ''}`).join('\n') + (issues.length > 12 ? `\n…and ${issues.length - 12} more` : '');
   }
+  if (/^(policy|the policy|what(?:'s| is) the policy|security policy|office policy|rules)$/.test(t)) return policyText();
   if (/^(plans?|the plan|plan status|what(?:'s| is) the plan)$/.test(t)) {
     if (!plans.size) return 'No plan is running. Give me a big task, or say "plan: <task>", and I\'ll have a planner split it up.';
     return [...plans.values()].map(describePlan).join('\n');
@@ -704,10 +721,12 @@ async function launchSpecialist(dept, dir) {
 // workers run at once; agents you hire yourself don't count.
 const PROJECT = process.env.OFFICE_PROJECT ? path.resolve(process.env.OFFICE_PROJECT) : __dirname;
 const WORKTREES = path.join(PROJECT, '.worktrees');
-const queue = { on: process.env.OFFICE_QUEUE === 'on', // paused until you say "queue on" (or start with OFFICE_QUEUE=on)
-  limit: Math.max(0, Number(process.env.OFFICE_WORKERS || 2)), workers: new Map(), skipped: new Map(), busy: false };
+const queue = { on: process.env.OFFICE_QUEUE !== 'off', // runs from the start; "queue off" (or OFFICE_QUEUE=off) pauses it
+  limit: Math.max(0, Number(process.env.OFFICE_WORKERS || 4)), workers: new Map(), skipped: new Map(), busy: false };
 function git(args) { return new Promise((resolve, reject) => execFile('git', ['-C', PROJECT, ...args], { timeout: 30000 }, (err, out, errOut) => err ? reject(new Error(String(errOut || err.message).trim().slice(0, 300))) : resolve(String(out)))); }
-async function makeWorktree(issueId) {
+const gitLock = { tail: Promise.resolve() }; // parallel 'git worktree add' runs trip over git's lock files
+function makeWorktree(issueId) { return serial(gitLock, () => makeWorktreeNow(issueId)); }
+async function makeWorktreeNow(issueId) {
   const dir = path.join(WORKTREES, issueId); const branch = `office/${issueId}`;
   fs.mkdirSync(WORKTREES, { recursive: true });
   if (fs.existsSync(path.join(dir, '.git'))) return { dir, branch }; // left from an earlier run: reuse it
@@ -715,7 +734,7 @@ async function makeWorktree(issueId) {
   catch (e) { if (!/already exists/.test(e.message)) throw e; await git(['worktree', 'add', dir, branch]); }
   return { dir, branch };
 }
-function queueRunning() { return [...queue.workers.values()].filter((w) => !w.done && agents.has(w.agentId)); }
+function queueRunning() { return [...queue.workers.values()].filter((w) => !w.done && (w.starting || agents.has(w.agentId))); }
 function queueMeta() { return { on: queue.on, limit: queue.limit, running: queueRunning().length, workers: [...queue.workers.entries()].map(([issueId, w]) => ({ issueId, agentId: w.agentId, name: w.name, dept: w.dept, branch: w.branch, done: !!w.done, startedAt: w.startedAt })).slice(-20) }; }
 async function eligibleIssues() {
   const [readyOut, listOut] = await Promise.all([bd(['ready', '--json']), bd(['list', '--status', 'open', '--json'])]);
@@ -735,19 +754,26 @@ function roomFor(issue) {
   return queue.on && running.filter((w) => !w.plan).length < queue.limit;
 }
 async function dispatchQueue() {
-  if (!beadsOk || !upstream.privileged || queue.busy) return;
+  if (!beadsOk || !upstream.privileged || !upstream.connected || queue.busy) return; // not connected: a launch would fail and park the task for 10 min
   queue.busy = true;
+  const starts = [];
   try {
-    for (let n = 0; n < 4; n++) { // a plan may free several parts at once
-      const next = (await eligibleIssues()).find(roomFor); if (!next) return;
-      try { await dispatchIssue(next); }
-      catch (e) {
-        queue.skipped.set(next.id, Date.now() + 10 * 60000); // don't hammer a task that won't start
-        const message = `Couldn't start ${next.id}: ${e.message}. I'll leave it for ten minutes.`;
-        console.log('[queue]', message); logChat('manager', 'floor manager', message, { ok: false }); fx('managerSay', null, { text: next.title, message, ok: false, action: 'answer', pending: false });
-      }
+    // Fill every free slot in one pass; each claimed task starts its specialist in parallel.
+    for (const issue of await eligibleIssues()) {
+      if (!roomFor(issue)) continue;
+      // Claim it in Beads first, only if still unassigned, so another bridge can't hand it out too.
+      try { await bd(['update', issue.id, '--if-assignee=', '--assignee', 'floor-manager', '--status', 'in_progress']); } catch { continue; }
+      queue.workers.set(issue.id, { starting: true, done: false, plan: isPlanIssue(issue), startedAt: Date.now() }); markDirty();
+      starts.push(dispatchIssue(issue).catch(async (e) => {
+        queue.workers.delete(issue.id); markDirty();
+        await bd(['update', issue.id, '--assignee', '', '--status', 'open', '--force']).catch(() => {}); // our claim: release it even if the agent's name is on it
+        queue.skipped.set(issue.id, Date.now() + 10 * 60000); // don't hammer a task that won't start
+        const message = `Couldn't start ${issue.id}: ${e.message}. I'll leave it for ten minutes.`;
+        console.log('[queue]', message); logChat('manager', 'floor manager', message, { ok: false }); fx('managerSay', null, { text: issue.title, message, ok: false, action: 'answer', pending: false });
+      }));
     }
   } finally { queue.busy = false; }
+  await Promise.all(starts);
 }
 async function dispatchIssue(issue) {
   const dept = (issue.labels || []).map((l) => DEPT_ALIASES[l]).find(Boolean) || classifyText(`${issue.title} ${issue.description || ''}`) || 'engineering';
@@ -755,7 +781,7 @@ async function dispatchIssue(issue) {
   const a = await launchSpecialist(dept, dir);
   const w = { agentId: a.id, name: agentName(a), dept, dir, branch, startedAt: Date.now(), done: false, plan: isPlanIssue(issue) };
   queue.workers.set(issue.id, w); markDirty();
-  await bd(['update', issue.id, '--assignee', agentName(a), '--status', 'in_progress']).catch(() => {});
+  await bd(['update', issue.id, '--assignee', agentName(a)]).catch(() => {});
   await bd(['note', issue.id, `Dispatched by the floor manager to ${agentName(a)} (${DEPT_NAMES[dept]}), working in ${dir} on branch ${branch}.`]).catch(() => {});
   const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\nYou are working in your own git worktree (${dir}) on branch ${branch}. Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
   const skill = skillFor(dept, `${issue.title} ${issue.description || ''}`, { defaultOk: false }); // queued issues only run a skill they name
@@ -768,7 +794,7 @@ async function dispatchIssue(issue) {
   fx('managerSay', a.id, { text: `${issue.id}: ${issue.title}`, message, ok: true, action: 'queue', pending: false });
   const pl = w.plan && planOf(issue.id); if (pl) { const part = pl.parts.find((x) => x.id === issue.id); if (part) { part.by = agentName(a); part.branch = branch; } }
 }
-if (beadsOk) setInterval(dispatchQueue, 15000);
+if (beadsOk) { setInterval(dispatchQueue, 15000); setTimeout(dispatchQueue, 3000); } // first pass once pixel-agents is connected, not 15 s in
 function parseQueue(text) {
   const t = text.trim(); let m;
   if ((m = t.match(/^queue\s*[:\-]\s*(.+)$/i)) || (m = t.match(/^(?:add|put)\s+(.+?)\s+(?:to|on|in)\s+(?:the\s+)?queue$/i))) return { kind: 'add', title: m[1].trim() };
@@ -835,23 +861,113 @@ async function dispatchHandoff(from, r, h, hops = 1) {
 // Desktop sessions can't be ended from here: pixel-agents just hides them until they're used again.
 const SEND_HOME = /\bsend\s+(?:all\s+)?(?:the\s+)?(?:idle|free|bored)\b.*\bhome\b|\b(?:idle|free|bored)\b.*\b(?:sen[dt]|go(?:ne)?)\s+home\b|\bsen[dt]\s+home\b.*\bidle\b|^(?:please\s+)?dismiss\s+(?:the\s+|all\s+)?idle\b/i;
 const isSendHome = (t) => t.length < 160 && !/^(?:add|build|make|implement|fix|write|create)\b|^@?[\w-]+(?:\s+\d+)?\s*:/i.test(t) && SEND_HOME.test(t);
+// hiredAt is set only when the office launches an agent, not when a bridge restart re-learns one
+const justHired = (a) => Date.now() - (a.hiredAt || 0) < 120000; // their task may still be on its way
 function idleForHome(a) {
-  if (a.parentAgentId || a.status === 'active' || a.permission || a.awaitingInput || a.ask || playing(a.id)) return false;
-  if (Date.now() - (a.createdAt || 0) < 120000) return false; // just hired: their task may still be on its way
+  if (a.parentAgentId || a.status === 'active' || a.permission || a.awaitingInput || a.ask || playing(a.id) || justHired(a)) return false;
   return !queueRunning().some((w) => w.agentId === a.id && !w.done);
 }
 function sendHomeHandle() {
   const result = { ok: false, action: 'sendHome', targetId: null, message: '' };
   if (!upstream.privileged) { result.message = "I can't send anyone home: the bridge is read-only (no pixel-agents token found)."; return { result, deliver: null }; }
   const going = [...agents.values()].filter(idleForHome);
-  if (!going.length) { result.message = 'Nobody is idle: everyone here is working or waiting on you.'; return { result, deliver: null }; }
+  const fresh = [...agents.values()].filter((a) => justHired(a) && a.status !== 'active' && !a.permission && !a.awaitingInput);
+  const freshNote = fresh.length ? ` ${fresh.map(agentName).join(', ')} just arrived, so I'm keeping ${fresh.length === 1 ? 'them' : 'them all'} for now.` : '';
+  if (!going.length) { result.message = (fresh.length ? 'Nobody else is idle.' : 'Nobody is idle: everyone here is working or waiting on you.') + freshNote; return { result, deliver: null }; }
   for (const a of going) sendUpstream({ type: 'closeAgent', id: a.id });
   const hired = going.filter((a) => a.hasTerminal), desk = going.length - hired.length;
   result.ok = true;
   result.message = `Sent ${going.length} home: ${going.map(agentName).join(', ')}.` +
-    (desk ? ` ${desk} of them ${desk === 1 ? 'is a desktop session' : 'are desktop sessions'}, so they'll be back when you use them.` : '');
+    (desk ? ` ${desk} of them ${desk === 1 ? 'is a desktop session' : 'are desktop sessions'}, so they'll be back when you use them.` : '') + freshNote;
   return { result, deliver: null };
 }
+// ---------- the office policy and the security desk ----------
+// office-policy.json says what agents may run without asking (written into every launched folder's
+// .claude/settings.local.json) and how the security desk decides the rest: a permission prompt that
+// still comes up goes to a Security specialist with the policy text, and their one-line verdict is
+// typed into the asking agent's terminal. Commands matching ask_daniel_patterns come straight to you.
+const POLICY_FILE = path.join(__dirname, 'office-policy.json');
+let policyCache = { at: 0, mtime: 0, policy: null };
+function policy() {
+  try {
+    const mtime = fs.statSync(POLICY_FILE).mtimeMs;
+    if (!policyCache.policy || mtime !== policyCache.mtime) { policyCache = { at: Date.now(), mtime, policy: JSON.parse(fs.readFileSync(POLICY_FILE, 'utf8')) }; }
+    return policyCache.policy;
+  } catch (e) { if (Date.now() - policyCache.at > 60000) { policyCache.at = Date.now(); console.log('[policy]', e.message); } return policyCache.policy; }
+}
+function applyPolicy(dir) { // merge the policy's allow/deny into the folder's local Claude settings
+  const p = policy(); if (!p || (!p.allow && !p.deny)) return false;
+  try {
+    const file = path.join(dir, '.claude', 'settings.local.json'); fs.mkdirSync(path.dirname(file), { recursive: true });
+    let cur = {}; try { cur = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { /* none yet */ }
+    const perms = cur.permissions = cur.permissions || {};
+    perms.allow = [...new Set([...(perms.allow || []), ...(p.allow || [])])];
+    perms.deny = [...new Set([...(perms.deny || []), ...(p.deny || [])])];
+    fs.writeFileSync(file, JSON.stringify(cur, null, 2) + '\n'); return true;
+  } catch (e) { console.log('[policy] could not write settings in', dir, e.message); return false; }
+}
+function policyText() {
+  const p = policy(); if (!p) return 'There is no office-policy.json next to server.mjs, so there is no policy: every prompt comes to you.';
+  const d = p.desk || {}; const list = (xs) => (xs || []).map((x) => `  • ${x}`).join('\n') || '  (nothing)';
+  return `Pre-approved in every launched folder (${(p.allow || []).length} rules) and denied outright (${(p.deny || []).length} rules): see office-policy.json.\nThe security desk approves:\n${list(d.approve)}\nrefuses:\n${list(d.refuse)}\nand brings to you:\n${list(d.ask_daniel)}`;
+}
+const desk = new Map(); // askerId -> { toolUseId, securityId, t, summary }
+const DESK_TIMEOUT = 4 * 60000;
+function deskable(a) {
+  if (!a.hasTerminal || a.parentAgentId || !a.ask || a.ask.kind !== 'permission' || !(a.permission || a.awaitingInput)) return false;
+  const cur = desk.get(a.id); if (cur && cur.toolUseId === a.ask.toolUseId && Date.now() - cur.t < DESK_TIMEOUT) return false;
+  const pending = pendingReplies.get(a.id); if (pending && pending.desk) return false; // the desk itself never gets desked
+  return true;
+}
+function deskSkip(a) { // commands you want to see yourself
+  const pats = (policy()?.desk?.ask_daniel_patterns) || []; const s = `${a.ask.summary || ''} ${a.ask.description || ''}`.toLowerCase();
+  return pats.find((x) => s.includes(String(x).toLowerCase())) || null;
+}
+function deskPrompt(a, p) {
+  const d = p.desk || {}; const list = (xs) => (xs || []).map((x) => `- ${x}`).join('\n') || '- (nothing)';
+  return `Security desk. You answer permission prompts for the office according to Daniel's policy. Do not run any tools and do not investigate: decide from the policy and the request below alone.\n\n${agentName(a)} (${DEPT_NAMES[a.dept]}), working in ${a.directoryName || 'the project'}, wants to run the tool ${a.ask.tool}:\n${a.ask.description ? `${a.ask.description}\n` : ''}${a.ask.summary || '(no details)'}\n\nPolicy. Approve:\n${list(d.approve)}\nRefuse:\n${list(d.refuse)}\nAsk Daniel:\n${list(d.ask_daniel)}\n\nReply with exactly one line and nothing else, in this form:\nAPPROVE: <reason in a few words>\nor REFUSE: <reason>\nor ASK: <what Daniel should decide>`;
+}
+async function deskRoute(a) {
+  const p = policy(); if (!p || !p.desk) return;
+  const skip = deskSkip(a);
+  if (skip) {
+    desk.set(a.id, { toolUseId: a.ask.toolUseId, securityId: null, t: Date.now(), summary: a.ask.summary, skipped: skip });
+    const message = `${agentName(a)} wants to run something the policy says is yours to decide ("${skip}"): ${(a.ask.summary || a.ask.tool).slice(0, 120)}. Allow or deny it in their panel.`;
+    logChat('manager', 'floor manager', message, { ok: false, action: 'desk' }); fx('managerSay', a.id, { text: `${agentName(a)} needs you`, message, ok: false, action: 'answer', pending: false });
+    return;
+  }
+  let sec = pickSpecialist('security', a.id);
+  desk.set(a.id, { toolUseId: a.ask.toolUseId, securityId: sec ? sec.id : null, t: Date.now(), summary: a.ask.summary });
+  a.desk = { name: sec ? agentName(sec) : 'the security desk', t: Date.now() }; markDirty();
+  const what = (a.ask.summary || a.ask.tool).replace(/\s+/g, ' ').slice(0, 90);
+  try {
+    if (!sec) { if (!upstream.privileged) return; sec = await launchSpecialist('security', homeDirFor(a)); const e = desk.get(a.id); if (e) e.securityId = sec.id; a.desk = { name: agentName(sec), t: Date.now() }; }
+    await typeInto(sec.id, deskPrompt(a, p));
+    pendingReplies.set(sec.id, { text: `desk: ${agentName(a)} wants ${what}`, t: Date.now(), issueId: null, hops: MAX_HOPS, desk: { askerId: a.id, toolUseId: a.ask.toolUseId, summary: a.ask.summary, tool: a.ask.tool } });
+    logEvent(a, 'manager', `permission sent to ${agentName(sec)} (security desk)`); logEvent(sec, 'manager', `checking ${agentName(a)}'s request`);
+    const message = `${agentName(a)} asked to run ${what}: checking with ${agentName(sec)} at the security desk.`;
+    logChat('manager', 'floor manager', message, { ok: true, action: 'desk' }); fx('managerSay', sec.id, { text: `${agentName(a)}: ${what}`, message, ok: true, action: 'desk', pending: false });
+  } catch (e) { desk.delete(a.id); a.desk = null; markDirty(); console.log('[desk]', e.message); }
+}
+async function handleDeskReport(sec, r, d) {
+  const a = agents.get(d.askerId); const m = /\b(APPROVE|REFUSE|ASK)\b\s*[:—–-]?\s*(.*)/i.exec(r.text || '');
+  const verdict = m ? m[1].toUpperCase() : 'ASK'; const reason = (m ? m[2] : r.text || '').trim().slice(0, 200) || 'no reason given';
+  const what = (d.summary || d.tool || '').replace(/\s+/g, ' ').slice(0, 90);
+  const live = a && a.hasTerminal && a.ask && a.ask.toolUseId === d.toolUseId && (a.permission || a.awaitingInput);
+  if (a) { a.desk = null; markDirty(); }
+  desk.delete(d.askerId);
+  if (!live) { logChat('manager', 'floor manager', `${r.name} said ${verdict} to ${a ? agentName(a) : 'an agent'}'s ${what}, but that prompt is already gone.`, { ok: true, action: 'desk' }); return; }
+  try {
+    if (verdict === 'APPROVE') { await typeInto(a.id, '1', true); logEvent(a, 'manager', `approved by ${r.name}: ${reason}`); }
+    else if (verdict === 'REFUSE') { await typeInto(a.id, '\u001b', false); await sleep(800); await typeInto(a.id, `The security desk (${r.name}) refused that: ${reason}. Don't retry it; find another way within your task or stop and report.`); logEvent(a, 'manager', `refused by ${r.name}: ${reason}`); }
+    const message = verdict === 'APPROVE' ? `${r.name} approved ${agentName(a)}'s ${what} (${reason}).` : verdict === 'REFUSE' ? `${r.name} refused ${agentName(a)}'s ${what} (${reason}).` : `${r.name} wants you to decide ${agentName(a)}'s ${what}: ${reason}. Allow or deny it in their panel.`;
+    logChat('manager', 'floor manager', message, { ok: verdict !== 'ASK', action: 'desk' });
+    fx('managerSay', verdict === 'ASK' ? a.id : null, { text: `${agentName(a)}: ${what}`, message, ok: verdict !== 'ASK', action: 'answer', pending: false });
+    if (verdict === 'ASK') desk.set(d.askerId, { toolUseId: d.toolUseId, securityId: sec.id, t: Date.now(), summary: d.summary, skipped: 'desk asked you' });
+  } catch (e) { logChat('manager', 'floor manager', `Couldn't pass ${r.name}'s answer to ${agentName(a)}: ${e.message}`, { ok: false }); }
+}
+try { for (const d of fs.readdirSync(WORKTREES)) if (fs.existsSync(path.join(WORKTREES, d, '.git'))) applyPolicy(path.join(WORKTREES, d)); } catch { /* no worktrees yet */ }
+setInterval(() => { for (const a of agents.values()) if (deskable(a)) deskRoute(a).catch((e) => console.log('[desk]', e.message)); }, 3000);
 // ---------- planning: a big request goes to a planner, who splits it into parts for the specialists ----------
 // The manager takes anything that reads as more than one job (or "plan: <task>") to a planner, a Claude
 // session like the others. The planner reads the code, changes nothing, and answers with a PLAN block.
@@ -1077,7 +1193,7 @@ function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'applicati
 const TOKEN = crypto.randomBytes(32).toString('hex');
 const TOKEN_FILE = path.join(os.homedir(), '.agent-office', 'token');
 fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true, mode: 0o700 });
-fs.writeFileSync(TOKEN_FILE, TOKEN, { mode: 0o600 }); fs.chmodSync(TOKEN_FILE, 0o600);
+function writeToken() { fs.writeFileSync(TOKEN_FILE, TOKEN, { mode: 0o600 }); fs.chmodSync(TOKEN_FILE, 0o600); } // written once we own the port, so a second start that fails on a busy port can't clobber the live token
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
 const SECURITY_HEADERS = { 'Content-Security-Policy': "frame-ancestors 'none'", 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
@@ -1156,4 +1272,5 @@ const server = http.createServer(async (req, res) => {
     res.end(file === path.join(PUBLIC, 'index.html') ? String(data).replace('<head>', `<head>\n<meta name="office-token" content="${TOKEN}" />`) : data);
   });
 });
-server.listen(PORT, '127.0.0.1', () => console.log(`\n  Agent Office 3D at http://127.0.0.1:${PORT}\n`));
+server.listen(PORT, '127.0.0.1', () => { writeToken(); console.log(`\n  Agent Office 3D at http://127.0.0.1:${PORT}\n`); });
+server.on('error', (e) => { console.log(`[bridge] cannot listen on ${PORT}: ${e.message}`); process.exit(1); });
