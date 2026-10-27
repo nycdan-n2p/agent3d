@@ -10,3 +10,4 @@ names.json
 .worktrees/
 .claude/settings.local.json
 screens/
+office-queue.json

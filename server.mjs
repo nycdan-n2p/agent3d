@@ -118,7 +118,7 @@ const sseClients = new Set();
 let dirty = false;
 function broadcast(obj) { const line = `data: ${JSON.stringify(obj)}\n\n`; for (const res of sseClients) res.write(line); }
 function snapshot() { return { type: 'state', upstream, agents: [...agents.values()], play: play.meta(), issues, beads: beadsOk, queue: queueMeta() }; }
-function markDirty() { dirty = true; }
+function markDirty() { dirty = true; try { saveQueue(); } catch { /* before the queue is set up */ } }
 setInterval(() => { if (dirty) { dirty = false; broadcast(snapshot()); } }, 50);
 function fx(kind, id, extra = {}) { broadcast({ type: 'fx', kind, id, ...extra }); }
 const play = createPlayroom({ buildsDir: path.join(__dirname, 'builds'), cli: LEGO_CLI, broadcast, fx, markDirty, present: (id) => agents.has(id) });
@@ -281,9 +281,11 @@ let issues = []; let issuesAt = 0; let issuesRefreshing = null;
 function refreshIssues() {
   if (!beadsOk) return Promise.resolve([]);
   if (issuesRefreshing) return issuesRefreshing;
-  issuesRefreshing = bd(['list', '--status', 'open,in_progress,blocked', '--json', '--brief', '--sort', 'priority']).then((out) => {
+  issuesRefreshing = Promise.all([bd(['list', '--status', 'open,in_progress,blocked', '--json', '--brief', '--sort', 'priority']), bd(['blocked', '--json']).catch(() => '[]')]).then(([out, blockedOut]) => {
     let list = []; try { list = JSON.parse(out) || []; } catch { list = []; }
-    const next = list.map((i) => ({ id: i.id, title: i.title, status: i.status, priority: i.priority ?? 2, type: i.issue_type || 'task', assignee: i.assignee || '', updated: i.updated_at || '' }));
+    let blocked = []; try { blocked = JSON.parse(blockedOut) || []; } catch { blocked = []; }
+    const blockedBy = new Map(blocked.map((b) => [b.id, (b.blocked_by || b.blockers || b.dependencies || []).map((d) => typeof d === 'string' ? d : d.id || d.depends_on_id || '').filter(Boolean)]));
+    const next = list.map((i) => ({ id: i.id, title: i.title, status: i.status, priority: i.priority ?? 2, type: i.issue_type || 'task', assignee: i.assignee || '', updated: i.updated_at || '', labels: i.labels || [], blockedBy: blockedBy.get(i.id) || null }));
     const changed = JSON.stringify(next) !== JSON.stringify(issues);
     issues = next; issuesAt = Date.now();
     if (changed) { markDirty(); fx('issues', null, { count: issues.length }); }
@@ -458,7 +460,7 @@ function connectUpstream() {
   const url = `ws://127.0.0.1:${d.port}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
   console.log(`[bridge] connecting to ws://127.0.0.1:${d.port}/ws (${token ? 'privileged' : 'read-only'})`);
   try { ws = new WebSocket(url); } catch (e) { console.log('[bridge] ws error', e.message); return setTimeout(connectUpstream, 3000); }
-  ws.onopen = () => { upstream.connected = true; ws.send(JSON.stringify({ type: 'webviewReady' })); ws.send(JSON.stringify({ type: 'requestDiagnostics' })); console.log('[bridge] connected'); markDirty(); };
+  ws.onopen = () => { upstream.connected = true; upstreamSince = Date.now(); ws.send(JSON.stringify({ type: 'webviewReady' })); ws.send(JSON.stringify({ type: 'requestDiagnostics' })); console.log('[bridge] connected'); markDirty(); };
   ws.onmessage = (ev) => { try { reduce(JSON.parse(ev.data)); } catch { /* ignore */ } };
   ws.onclose = () => { upstream.connected = false; agents.clear(); for (const id of [...terminals.keys()]) detachTerminal(id); markDirty(); console.log('[bridge] disconnected; reconnecting'); setTimeout(connectUpstream, 2000); };
   ws.onerror = () => { /* onclose follows */ };
@@ -795,6 +797,18 @@ const PROJECT = process.env.OFFICE_PROJECT ? path.resolve(process.env.OFFICE_PRO
 const WORKTREES = path.join(PROJECT, '.worktrees');
 const queue = { on: process.env.OFFICE_QUEUE !== 'off', // runs from the start; "queue off" (or OFFICE_QUEUE=off) pauses it
   limit: Math.max(0, Number(process.env.OFFICE_WORKERS || 4)), workers: new Map(), skipped: new Map(), busy: false };
+// Who is on which task survives a bridge restart (agent ids are pixel-agents' and persist), so reviews and
+// slot accounting carry on instead of every running task looking idle after a restart.
+const QUEUE_FILE = path.join(__dirname, 'office-queue.json');
+try { for (const [id, w] of Object.entries(JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')))) if (!w.done && !w.starting) queue.workers.set(id, w); } catch { /* none yet */ }
+let queueSaveTimer = 0;
+function saveQueue() {
+  clearTimeout(queueSaveTimer);
+  queueSaveTimer = setTimeout(() => {
+    const out = {}; for (const [id, w] of queue.workers) if (!w.done && !w.starting) out[id] = { ...w, review: w.review ? { ...w.review, devReport: w.review.devReport ? { id: w.review.devReport.id, name: w.review.devReport.name, dept: w.review.devReport.dept, text: (w.review.devReport.text || '').slice(0, 2000), recap: w.review.devReport.recap || '' } : null } : undefined };
+    fs.writeFile(QUEUE_FILE, JSON.stringify(out, null, 1), () => {});
+  }, 300);
+}
 function git(args) { return new Promise((resolve, reject) => execFile('git', ['-C', PROJECT, ...args], { timeout: 30000 }, (err, out, errOut) => err ? reject(new Error(String(errOut || err.message).trim().slice(0, 300))) : resolve(String(out)))); }
 const gitLock = { tail: Promise.resolve() }; // parallel 'git worktree add' runs trip over git's lock files
 function makeWorktree(issueId) { return serial(gitLock, () => makeWorktreeNow(issueId)); }
@@ -869,6 +883,7 @@ function idleSpecialists(dept) {
     .sort((p, q) => (p.contextTokens || 0) - (q.contextTokens || 0));
 }
 async function reuseSpecialist(dept, issueId) {
+  if (fs.existsSync(path.join(WORKTREES, issueId, '.git'))) return null; // earlier work on this task lives there: continue it in place
   for (const a of idleSpecialists(dept)) {
     const dir = path.join(WORKTREES, a.directoryName);
     try { const branch = await serial(gitLock, () => switchWorktree(dir, issueId)); return { a, dir, branch }; }
@@ -927,7 +942,7 @@ async function queueHandle(q) {
   const running = queueRunning(); let eligible = [];
   try { eligible = await eligibleIssues(); } catch { /* bd down */ }
   result.message = `Queue ${queue.on ? 'on' : 'paused'} · ${running.length}/${queue.limit} running` +
-    (running.length ? `\n` + running.map((w) => `◐ ${[...queue.workers.entries()].find(([, x]) => x === w)[0]} ${w.name} (${DEPT_NAMES[w.dept]}) on ${w.branch}`).join('\n') : '') +
+    (running.length ? `\n` + running.map((w) => `◐ ${[...queue.workers.entries()].find(([, x]) => x === w)[0]} ${w.starting ? 'starting a specialist…' : `${w.name} (${DEPT_NAMES[w.dept]}${w.review ? `, in review round ${w.review.round}` : ''}) on ${w.branch}`}`).join('\n') : '') +
     (eligible.length ? `\nWaiting: ` + eligible.slice(0, 6).map((i) => `${i.id} P${i.priority ?? 2} ${i.title}`).join('; ') + (eligible.length > 6 ? ` …+${eligible.length - 6}` : '') : '\nNothing waiting.');
   return { result, deliver: null };
 }
@@ -999,16 +1014,20 @@ async function startReview(dev, r, w) {
   const message = `Review round ${round} for ${w.issueId}: ${w.name}'s branch goes to QA${stages.includes('security') ? ' and Security' : ''} before it closes.`;
   logChat('manager', 'floor manager', message, { ok: true, action: 'handoff' }); fx('managerSay', dev.id, { text: `${w.issueId}: review`, message, ok: true, action: 'handoff', pending: true });
   await bd(['note', w.issueId, message]).catch(() => {});
-  for (const stage of stages) {
-    let target = pickSpecialist(stage, dev.id);
-    if (!target) target = await launchSpecialist(stage, homeDirFor(dev));
-    const prompt = reviewPrompt(stage, w, title, issue.description, ch, round);
-    await giveTask(target, prompt, `review of ${w.issueId} (${stage})`, { discoveredFrom: w.issueId, hops: MAX_HOPS, review: { issueId: w.issueId, stage, round } });
-    w.review.results[stage] = { agentId: target.id, name: agentName(target), verdict: null };
-    logChat('manager', 'floor manager', `${agentName(target)} (${DEPT_NAMES[stage]}) is reviewing ${w.issueId}.`, { ok: true }); fx('managerDone', target.id, { ok: true, message: `${agentName(target)} is reviewing ${w.issueId}`, text: `${w.issueId}: review` });
-  }
+  for (const stage of stages) await sendReviewStage(w, stage, dev.id);
   refreshIssues();
 }
+async function sendReviewStage(w, stage, exceptId = null) {
+  const issue = issues.find((i) => i.id === w.issueId) || {}; const title = issue.title || w.issueId;
+  const ch = await branchChange(w); const dev = agents.get(w.agentId);
+  let target = pickSpecialist(stage, exceptId);
+  if (!target) target = await launchSpecialist(stage, homeDirFor(dev));
+  const prompt = reviewPrompt(stage, w, title, issue.description, ch, w.review.round);
+  await giveTask(target, prompt, `review of ${w.issueId} (${stage})`, { discoveredFrom: w.issueId, hops: MAX_HOPS, review: { issueId: w.issueId, stage, round: w.review.round } });
+  w.review.results[stage] = { agentId: target.id, name: agentName(target), verdict: null }; markDirty();
+  logChat('manager', 'floor manager', `${agentName(target)} (${DEPT_NAMES[stage]}) is reviewing ${w.issueId}.`, { ok: true }); fx('managerDone', target.id, { ok: true, message: `${agentName(target)} is reviewing ${w.issueId}`, text: `${w.issueId}: review` });
+}
+const isReviewTitle = (t) => /^(?:\/\S+\s+)?(?:QA review|Security pass) of the changes on branch /.test(t || '');
 function finishWithoutReview(issueId, r, w, why) { // the pass could not run: close as before and say so
   const message = `No review for ${issueId} (${why}); closing on ${r.name}'s report.`;
   logChat('manager', 'floor manager', message, { ok: false }); console.log('[review]', message);
@@ -1051,6 +1070,45 @@ async function finishReview(w) {
   logChat('manager', 'floor manager', message, { ok: false, action: 'answer' }); fx('managerSay', null, { text: `${w.issueId}: review`, message, ok: false, action: 'answer', pending: false });
   await bd(['note', w.issueId, message]).catch(() => {}); refreshIssues();
 }
+// ---------- orphaned tasks: an in-progress office task whose assignee has left the floor goes back on the board ----------
+// Runs once a minute, after the floor has had time to re-learn its agents following a (re)start. Only tasks the
+// office handed out (label `office`) are touched; your own tasks are never reopened.
+const ORPHAN_GRACE_MS = 3 * 60000;
+let upstreamSince = 0;
+async function sweepOrphans() {
+  if (!beadsOk || !upstream.connected || !upstreamSince || Date.now() - upstreamSince < ORPHAN_GRACE_MS) return;
+  const onFloor = new Set([...agents.values()].flatMap((a) => [a.humanName, a.nickname, a.teammateName, a.directoryName]).filter(Boolean).map((n) => n.toLowerCase()));
+  for (const w of queueRunning()) if (w.name) onFloor.add(w.name.toLowerCase());
+  onFloor.add('floor-manager');
+  for (const i of issues) {
+    if (i.status !== 'in_progress' || !i.assignee || !(i.labels || []).includes('office')) continue;
+    if (onFloor.has(i.assignee.toLowerCase())) continue;
+    if (i.updated && Date.now() - Date.parse(i.updated) < ORPHAN_GRACE_MS) continue; // just handed out: the agent may still be arriving
+    if (isReviewTitle(i.title)) { // a review whose reviewer left: the stage is re-run below from the developer's task, this ticket just closes
+      await bd(['close', i.id, '--reason', `${i.assignee} left before finishing the review; the stage is being re-run`]).catch(() => {});
+      continue;
+    }
+    try {
+      await bd(['update', i.id, '--assignee', '', '--status', 'open', '--force']);
+      await bd(['note', i.id, `${i.assignee} left the office before finishing this; the floor manager put it back on the board.`]).catch(() => {});
+      queue.workers.delete(i.id);
+      const message = `${i.assignee} is gone, so ${i.id} "${i.title}" is back on the board.`;
+      console.log('[orphans]', message); logChat('manager', 'floor manager', message, { ok: true, action: 'queue' }); fx('managerSay', null, { text: i.id, message, ok: true, action: 'answer', pending: false });
+    } catch (e) { console.log('[orphans]', i.id, e.message); }
+  }
+  for (const w of queue.workers.values()) { // a review stage whose reviewer left gets a new reviewer
+    if (w.done || !w.review || w.review.passed || w.review.gaveUp) continue;
+    for (const stage of w.review.stages) {
+      const res = w.review.results[stage]; if (!res || res.verdict || agents.has(res.agentId)) continue;
+      if (Date.now() - (w.review.startedAt || 0) < ORPHAN_GRACE_MS) continue;
+      const message = `${res.name} left mid-review, so ${DEPT_NAMES[stage]} is reviewing ${w.issueId} again.`;
+      console.log('[orphans]', message); logChat('manager', 'floor manager', message, { ok: true });
+      try { await sendReviewStage(w, stage, w.agentId); } catch (e) { console.log('[orphans]', w.issueId, e.message); }
+    }
+  }
+  await refreshIssues(); dispatchQueue();
+}
+setInterval(() => sweepOrphans().catch((e) => console.log('[orphans]', e.message)), 60000);
 // ---------- sending idle agents home ----------
 // Office-launched (pty) agents are closed for good; the manager hires fresh specialists when work comes in.
 // Desktop sessions can't be ended from here: pixel-agents just hides them until they're used again.

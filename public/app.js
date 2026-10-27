@@ -220,8 +220,9 @@ const taskTex = new THREE.CanvasTexture(taskCanvas); taskTex.colorSpace = THREE.
 const taskMaterial = new THREE.MeshStandardMaterial({ map: taskTex, emissiveMap: taskTex, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.4 });
 let lastIssues = []; let beadsOn = false; let taskSig = ''; let deptSkills = {}; let lastQueue = null;
 const PRIO_COLORS = ['#ff4d6d', '#ffb020', '#4ea1ff', '#8b92b8', '#5c6390'];
+function floorAgents() { try { return lastAgents; } catch { return []; } } // the board is first drawn before the agent list exists
 function drawTaskBoard(force = false) {
-  const sig = JSON.stringify([beadsOn, lastIssues, lastQueue]); if (!force && sig === taskSig) return; taskSig = sig;
+  const floor = floorAgents(); const sig = JSON.stringify([beadsOn, lastIssues, lastQueue, floor.map((a) => a.humanName || a.nickname || a.directoryName)]); if (!force && sig === taskSig) return; taskSig = sig;
   const c = taskCanvas, ctx = c.getContext('2d'); const W = c.width, H = c.height; const mono = 'ui-monospace, Menlo, Consolas, monospace';
   ctx.fillStyle = '#0b0a14'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#ffb020'; ctx.fillRect(0, 0, W, 6);
@@ -235,11 +236,16 @@ function drawTaskBoard(force = false) {
     const y = 80 + k * 39; const col = PRIO_COLORS[Math.min(4, i.priority)] || '#8b92b8';
     ctx.fillStyle = col; roundRect(ctx, 28, y + 6, 42, 24, 6); ctx.fill();
     ctx.fillStyle = '#0b0d17'; ctx.font = `bold 16px ${mono}`; ctx.fillText(`P${i.priority}`, 36, y + 10);
-    ctx.fillStyle = i.status === 'in_progress' ? '#39d98a' : '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(i.status === 'in_progress' ? '◐' : '○', 82, y + 8);
+    const blocked = !!(i.blockedBy && i.blockedBy.length) && i.status !== 'in_progress'; const epic = i.type === 'epic';
+    const glyph = i.status === 'in_progress' ? '◐' : blocked ? '●' : epic ? '▣' : '○';
+    ctx.fillStyle = i.status === 'in_progress' ? '#39d98a' : blocked ? '#ff4d6d' : epic ? '#8b92b8' : '#5c6390'; ctx.font = `20px ${mono}`; ctx.fillText(glyph, 82, y + 8);
     ctx.fillStyle = '#8b92b8'; ctx.font = `16px ${mono}`; ctx.fillText(i.id.slice(-8), 110, y + 11);
-    ctx.fillStyle = '#e8ecff'; ctx.font = `19px ${mono}`; ctx.fillText(i.title.slice(0, 60) + (i.title.length > 60 ? '…' : ''), 215, y + 9);
+    const tag = blocked ? `⛔ after ${i.blockedBy.map((b) => b.slice(-5)).join(',')} · ` : epic ? 'epic · ' : '';
+    ctx.fillStyle = blocked || epic ? '#8b92b8' : '#e8ecff'; ctx.font = `19px ${mono}`;
+    const title = tag + i.title; ctx.fillText(title.slice(0, 60) + (title.length > 60 ? '…' : ''), 215, y + 9);
     const qw = lastQueue?.workers?.find((w) => w.issueId === i.id && !w.done);
-    if (i.assignee) { ctx.fillStyle = qw ? '#39d98a' : '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText((qw ? '🌿 ' : '') + i.assignee.slice(0, 14), W - 28, y + 12); ctx.textAlign = 'left'; }
+    const gone = i.assignee && i.assignee !== 'floor-manager' && !floor.some((a) => [a.humanName, a.nickname, a.teammateName, a.directoryName].some((n) => n && n.toLowerCase() === i.assignee.toLowerCase()));
+    if (i.assignee) { ctx.fillStyle = qw ? '#39d98a' : gone ? '#ff4d6d' : '#c77dff'; ctx.font = `15px ${mono}`; ctx.textAlign = 'right'; ctx.fillText((qw ? '🌿 ' : gone ? '✗ ' : '') + i.assignee.slice(0, 14) + (gone ? ' (gone)' : ''), W - 28, y + 12); ctx.textAlign = 'left'; }
   });
   if (lastIssues.length > 12) { ctx.fillStyle = '#5c6390'; ctx.font = `16px ${mono}`; ctx.fillText(`+${lastIssues.length - 12} more`, 28, 80 + 12 * 39); }
   taskTex.needsUpdate = true;
