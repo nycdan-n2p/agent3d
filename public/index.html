@@ -37,6 +37,22 @@
   .ptab em { font-style: normal; color: var(--dim); font-size: 11px; }
   .ptab.on { border-color: var(--pc, var(--accent)); box-shadow: inset 0 -2px 0 var(--pc, var(--accent)); }
   .ptab.on em { color: var(--ink); }
+  .ptab.add { color: var(--dim); padding: 5px 8px; }
+  .ptab.add:hover { color: var(--ink); }
+  /* the new-project panel: a folder, what you're building, and an optional first task */
+  #newproj { position: absolute; right: 14px; top: 64px; width: 380px; display: none; flex-direction: column; overflow: hidden; border-color: rgba(255,176,32,0.5); box-shadow: 0 0 40px rgba(255,176,32,0.18); z-index: 5; }
+  #newproj.show { display: flex; }
+  #newproj .nh { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(255,176,32,0.16); border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 12px; }
+  #newproj .nh b { flex: 1; }
+  #newproj .nh .x { cursor: pointer; color: var(--dim); } #newproj .nh .x:hover { color: var(--ink); }
+  #newproj .nb { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+  #newproj label { display: flex; flex-direction: column; gap: 4px; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  #newproj input, #newproj textarea { font: inherit; font-size: 12px; color: var(--ink); background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 7px 9px; resize: vertical; text-transform: none; letter-spacing: 0; }
+  #newproj input:focus, #newproj textarea:focus { outline: none; border-color: rgba(255,176,32,0.7); }
+  #newproj .nf { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dim); }
+  #newproj .nf span { flex: 1; }
+  #newproj .nf .go { background: rgba(255,176,32,0.3); border-color: rgba(255,176,32,0.7); }
+  #newproj .nf .go:disabled { opacity: 0.5; cursor: default; }
   .ptab b.need { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 8px var(--bad); animation: pulse 1s infinite; }
   button { pointer-events: auto; font: inherit; font-size: 12px; color: var(--ink); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
   button:hover { background: rgba(255,255,255,0.12); }
@@ -231,6 +247,15 @@
     <button id="btnOverview" title="Corner overview of the whole floor">overview</button>
     <button id="btnPlay" title="Give every idle agent a box of LEGO">🧱 play</button>
     <button id="btnReports" title="Reports the agents dropped off at the office">📋 reports<i class="badge" id="rBadge"></i></button>
+  </div>
+  <div id="newproj" class="panel">
+    <div class="nh"><b>➕ New project</b><span class="x" id="npClose">✕</span></div>
+    <div class="nb">
+      <label>folder<input id="npFolder" placeholder="name under Downloads / Documents / Desktop, or a full path" autocomplete="off" spellcheck="false" /></label>
+      <label>what are you building?<textarea id="npAbout" rows="3" placeholder="a sentence or two; the floor manager passes it on with every task in this project"></textarea></label>
+      <label>first task (optional)<input id="npTask" placeholder="leave empty to just open the project" autocomplete="off" /></label>
+      <div class="nf"><span id="npHint">⌘⏎ starts · esc closes</span><button type="button" id="npCancel">cancel</button><button type="button" class="go" id="npStart">start project</button></div>
+    </div>
   </div>
   <div id="reports" class="panel"><div class="rh"><b>📋 Reports</b><span id="rCount"></span><span class="x" id="reportsClose">✕</span></div><div class="rl" id="rList"><div class="none">No reports yet. When an agent finishes a task it walks to the office and drops one here.</div></div></div>
   <div id="log" class="panel"><div class="lh"><b>💬 floor manager</b><span class="x" id="logClose">✕</span></div><div class="lc" id="logBody"></div></div>
