@@ -1,0 +1,12 @@
+{
+  "name": "agent-office-3d",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Three.js office where your Claude Code agents work, wander, and wait. Feeds off a running Pixel Agents standalone server.",
+  "scripts": {
+    "start": "node server.mjs",
+    "pixel-agents": "npx -y pixel-agents@1.5.0 --port 4848"
+  },
+  "engines": { "node": ">=22" }
+}
