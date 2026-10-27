@@ -517,8 +517,8 @@ function buildMezzanine() {
   // your desk, facing the floor, with a reading lamp, a plant and a sign
   const desk = buildDesk(MEZZ.deskX, MEZZ.deskZ, false); desk.group.position.y = MEZZ.y; // chair at the back, monitor toward the railing: you look over the floor
   drawScreen(desk.screen, 'think', 'AGENT OFFICE'); desk.screen.userData.key = 'you';
-  const lamp = new THREE.PointLight(0xffe2b8, 6, 10, 1.6); lamp.position.set(MEZZ.deskX, MEZZ.y + 2.4, MEZZ.deskZ + 1.5); g.add(lamp);
-  const bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0xffe2b8, emissive: 0xffe2b8, emissiveIntensity: 1.6 })); bulb.position.set(MEZZ.deskX, ROOM.h - 0.8, MEZZ.deskZ); g.add(bulb);
+  const lamp = new THREE.PointLight(0xffe2b8, 3, 10, 1.6); lamp.position.set(MEZZ.deskX, MEZZ.y + 2.4, MEZZ.deskZ + 1.5); g.add(lamp);
+  const bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0xffe2b8, emissive: 0xffe2b8, emissiveIntensity: 0.8 })); bulb.position.set(MEZZ.deskX, ROOM.h - 0.8, MEZZ.deskZ); g.add(bulb);
   const p1 = plant(-4.5, MEZZ.z1 - 0.9, 1.1); p1.position.y = MEZZ.y; g.add(p1);
   const p2 = plant(4.5, MEZZ.z1 - 0.9, 1.0); p2.position.y = MEZZ.y; g.add(p2);
   const sofa = couch(9, MEZZ.z1 - 1.2, 0); sofa.position.y = MEZZ.y; g.add(sofa);
