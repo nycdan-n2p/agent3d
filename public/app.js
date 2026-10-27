@@ -1520,8 +1520,8 @@ function selectProject(name) {
 }
 function renderProjects() {
   const sel = effProject(); const total = lastAgents.filter((a) => !a.parentAgentId).length;
-  const sig = JSON.stringify([sel, total, lastProjects.map((p) => [p.name, p.color, p.agents, p.waiting])]); if (sig === projectsSig) return; projectsSig = sig;
-  projectsEl.classList.toggle('show', lastProjects.length >= 2); projectsEl.innerHTML = '';
+  const sig = JSON.stringify([sel, total, connected, lastProjects.map((p) => [p.name, p.color, p.agents, p.waiting, p.about])]); if (sig === projectsSig) return; projectsSig = sig;
+  projectsEl.classList.toggle('show', connected); projectsEl.innerHTML = '';
   const tab = (name, color, count, need, on, title) => {
     const b = document.createElement('button'); b.className = 'ptab' + (on ? ' on' : ''); b.type = 'button'; b.title = title;
     if (color) { b.style.setProperty('--pc', color); if (on) b.style.background = hexRgba(color, 0.22); }
@@ -1529,7 +1529,31 @@ function renderProjects() {
     b.onclick = () => selectProject(name === 'All' && !color ? null : name); projectsEl.appendChild(b);
   };
   tab('All', null, total, false, !sel, 'every project on the floor');
-  for (const p of lastProjects) tab(p.name, p.color, p.agents, p.waiting > 0, sel === p.name, `${p.root || p.name}\n${p.working} working · ${p.waiting} waiting on you · ${p.idle} idle${p.beads ? ' · beads' : ''}`);
+  for (const p of lastProjects) tab(p.name, p.color, p.agents, p.waiting > 0, sel === p.name, `${p.root || p.name}\n${p.working} working · ${p.waiting} waiting on you · ${p.idle} idle${p.beads ? ' · beads' : ''}${p.about ? `\n\n${p.about}` : ''}`);
+  const add = document.createElement('button'); add.className = 'ptab add'; add.type = 'button'; add.textContent = '+'; add.title = 'start a new project: a folder (name under Downloads, Documents, Desktop… or a full path), optionally "folder: first task"';
+  add.onclick = openProjectBox; projectsEl.appendChild(add);
+}
+// the + tab: a folder, what Daniel is building there, and an optional first task. The bridge remembers the
+// description per folder and hands it to every agent in that project; the new tab is selected once it appears.
+let pendingProject = null; // basename of the folder we just launched into
+const npPanel = $('#newproj'), npFolder = $('#npFolder'), npAbout = $('#npAbout'), npTask = $('#npTask'), npStart = $('#npStart'), npHint = $('#npHint');
+function openProjectBox() { npPanel.classList.add('show'); npStart.disabled = false; npHint.textContent = '⌘⏎ starts · esc closes'; setTimeout(() => npFolder.focus(), 30); }
+function closeProjectBox() { npPanel.classList.remove('show'); }
+$('#npClose').onclick = closeProjectBox; $('#npCancel').onclick = closeProjectBox; npStart.onclick = () => addProject();
+npPanel.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeProjectBox(); } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || e.target.tagName === 'INPUT')) { e.preventDefault(); addProject(); } });
+async function addProject() {
+  const folder = npFolder.value.trim(), about = npAbout.value.trim(), task = npTask.value.trim();
+  if (!folder) { npFolder.focus(); return; }
+  npStart.disabled = true; npHint.textContent = 'finding the folder…';
+  try {
+    const j = await (await api('/api/projects/about', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder, about }) })).json();
+    if (!j.ok) { npHint.textContent = j.message || 'could not find that folder'; npStart.disabled = false; npFolder.focus(); return; }
+    pendingProject = j.name; closeProjectBox(); npFolder.value = ''; npAbout.value = ''; npTask.value = '';
+    manager.say('On it!', { ms: 3000 }); manager.jumpV = 2.4;
+    const r = await api('/api/manager', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: `new agent in ${j.root}${task ? `: ${task}` : ''}`, images: [], project: null }) });
+    const m = await r.json(); if (!m.ok) { pendingProject = null; toast(m.message || 'could not start that project'); }
+    else toast(`starting ${j.name}${about ? ' (description saved)' : ''}…`);
+  } catch { npHint.textContent = 'bridge offline — run `npm start`'; npStart.disabled = false; }
 }
 $('#btnOrbit').onclick = (e) => { controls.autoRotate = !controls.autoRotate; e.target.classList.toggle('on', controls.autoRotate); };
 $('#btnSound').onclick = (e) => { soundOn = !soundOn; e.target.classList.toggle('on', soundOn); if (soundOn) chime(); };
@@ -1588,7 +1612,9 @@ function applyState(s) {
     for (const a of s.agents) for (const e of a.log || []) all.push({ t: e.t, kind: e.kind === 'tool' ? 'tool' : e.kind === 'turn' ? 'turnEnd' : e.kind, name: avatars.get(a.id)?.name() || `agent ${a.id}`, text: e.text.replace(/mcp__\S+/g, (m) => prettyTool(m)), project: a.project || null });
     all.sort((p, q) => p.t - q.t); for (const e of all.slice(-40)) feed.push(e);
   }
-  renderProjects(); renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
+  renderProjects();
+  if (pendingProject && lastProjects.some((p) => p.name === pendingProject)) { const n = pendingProject; pendingProject = null; selectProject(n); }
+  renderRoster(s.agents); renderDetail(); drawBoard(s.agents); renderPlay();
 }
 window.__officeFx = (f) => applyFx(f); // debug hook: replay an event from the console
 window.__officeState = (s) => { applyState({ upstream: { connected: true, port: 0 }, agents: [], ...s }); return lastAgents.length; }; // debug hook: feed a fake state snapshot

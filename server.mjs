@@ -687,6 +687,8 @@ function statusAnswer(text) {
     return `${issues.length} open:\n` + issues.slice(0, 12).map((i) => `${i.id} P${i.priority} ${i.status === 'in_progress' ? '◐' : '○'} ${i.title}${i.assignee ? ` (${i.assignee})` : ''}`).join('\n') + (issues.length > 12 ? `\n…and ${issues.length - 12} more` : '');
   }
   if (/^(policy|the policy|what(?:'s| is) the policy|security policy|office policy|rules)$/.test(t)) return policyText();
+  if ((m = t.match(/^what(?:'s| is| are we building in)\s+(?:project\s+)?(\S+?)(?:\s+about)?$/)) && (projectRootOf(m[1]) || knownRoot(m[1]))) { const r = projectRootOf(m[1]) || m[1]; return projectAbout(r) ? `${path.basename(r)}: ${projectAbout(r)}` : `Nobody told me what ${path.basename(r)} is about. Say "about ${path.basename(r)}: <what you're building>".`; }
+  if (/^projects?$/.test(t)) { const ps = projectsList(); return ps.length ? ps.map((p) => `${p.name}: ${p.agents} agent${p.agents === 1 ? '' : 's'}${p.about ? ` — ${p.about.slice(0, 120)}` : ''}`).join('\n') : 'Nobody is on the floor.'; }
   if (/^(plans?|the plan|plan status|what(?:'s| is) the plan)$/.test(t)) {
     if (!plans.size) return 'No plan is running. Give me a big task, or say "plan: <task>", and I\'ll have a planner split it up.';
     return [...plans.values()].map(describePlan).join('\n');
@@ -861,11 +863,23 @@ function cwdFromJsonl(file) {
 function projectRootOfAgent(a) { const cwd = cwdFromJsonl(a.jsonlFile); return (cwd && rootOfCwd(cwd)) || projectRootOf(a.directoryName); }
 function projectKeyOf(a) { const root = projectRootOfAgent(a); return root ? path.basename(root) : (a.directoryName || null); }
 function knownRoot(root) { return typeof root === 'string' && (root === PROJECT || [...agents.values()].some((a) => projectRootOfAgent(a) === root)); }
+// What Daniel is building in each project, in his words: kept per folder in office-projects.json and
+// handed to every agent in that project along with its task.
+const PROJECTS_FILE = path.join(__dirname, 'office-projects.json');
+let projectInfo = {}; // root -> { about, at }
+try { projectInfo = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')) || {}; } catch { /* none yet */ }
+function projectAbout(root) { return (root && projectInfo[root]?.about) || ''; }
+function setProjectAbout(root, about) {
+  const text = String(about || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+  if (text) projectInfo[root] = { about: text, at: Date.now() }; else delete projectInfo[root];
+  fs.writeFile(PROJECTS_FILE, JSON.stringify(projectInfo, null, 1) + '\n', () => {}); markDirty(); return text;
+}
+function projectContext(a) { const about = projectAbout(projectRootOfAgent(a)); return about ? `\n\n(Project context from Daniel: ${about})` : ''; }
 function projectsList() {
   const by = new Map();
   for (const a of agents.values()) {
     const name = projectKeyOf(a); if (!name) continue;
-    let p = by.get(name); if (!p) { const root = projectRootOfAgent(a); p = { name, root, color: projectColor(name), agents: 0, working: 0, waiting: 0, idle: 0, beads: !!(root && fs.existsSync(path.join(root, '.beads'))), home: root === PROJECT }; by.set(name, p); }
+    let p = by.get(name); if (!p) { const root = projectRootOfAgent(a); p = { name, root, color: projectColor(name), agents: 0, working: 0, waiting: 0, idle: 0, beads: !!(root && fs.existsSync(path.join(root, '.beads'))), home: root === PROJECT, about: projectAbout(root) }; by.set(name, p); }
     if (a.parentAgentId) continue;
     p.agents++;
     if (a.permission || (a.status !== 'active' && a.awaitingInput)) p.waiting++; else if (a.status === 'active') p.working++; else p.idle++;
@@ -996,7 +1010,7 @@ async function dispatchIssue(issue) {
   const where = reused ? `Your previous task is finished; forget it. Your worktree (${dir}) is now on a fresh branch ${branch}, cut from the project's current HEAD, so start by re-reading any file you touch.` : `You are working in your own git worktree (${dir}) on branch ${branch}.`;
   const prompt = `Task ${issue.id}: ${issue.title}\n\n${(issue.description || '').trim()}\n\n${where} Commit your work on that branch when it is done; do not push and do not switch branches. The floor manager tracks this task as ${issue.id}, so you don't need bd for it. When you finish, reply with a short report of what you changed and how you verified it.`;
   const skill = skillFor(dept, `${issue.title} ${issue.description || ''}`, { defaultOk: false }); // queued issues only run a skill they name
-  await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + HANDOFF_RULE);
+  await typeInto(a.id, withSkill(prompt, skill) + projectContext(a) + SCREEN_RULE + HANDOFF_RULE);
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   pendingReplies.set(a.id, { text: `queue: ${issue.title}`, t: Date.now(), issueId: issue.id, hops: 0, skill, queued: true });
   refreshIssues();
@@ -1041,7 +1055,7 @@ async function queueHandle(q) {
 const MAX_HOPS = 1; // a task may be handed off once; the specialist finishes it
 async function giveTask(a, prompt, from, { discoveredFrom = null, hops = 0, review = null } = {}) {
   const skill = isVideo(a) ? 'lemo-opuscar:lemo-opuscar' : skillFor(a.dept, prompt);
-  await typeInto(a.id, withSkill(prompt, skill) + SCREEN_RULE + (isVideo(a) ? VIDEO_RULE : '') + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
+  await typeInto(a.id, withSkill(prompt, skill) + projectContext(a) + SCREEN_RULE + (isVideo(a) ? VIDEO_RULE : '') + (hops < MAX_HOPS ? HANDOFF_RULE : '\n\n(Office rule: this is a handoff. Finish it yourself and do not hand it off again.)'));
   if (skill) logEvent(a, 'tool', `running /${skill}`);
   const issueId = await fileTask({ prompt: skill ? `/${skill} ${prompt}` : prompt, from, agent: a, discoveredFrom });
   pendingReplies.set(a.id, { text: from, t: Date.now(), issueId, hops, skill, review });
@@ -1491,19 +1505,28 @@ async function managerHandle(text, { project: root = null } = {}) { // root: the
     else result.message = `${agentName(a)}, from now on you're ${JOB_NAMES[move.dept]}.`;
     return { result, deliver: null };
   }
+  const ab = text.trim().match(/^(?:about|project)\s+(\S+?)\s*:\s*([\s\S]+)$/i); // "about <folder>: what I'm building"
+  if (ab) {
+    const dir = knownRoot(ab[1]) ? ab[1] : projectRootOf(ab[1]) || resolveDir(ab[1]);
+    if (!dir) { result.message = `I can't find a project called "${ab[1]}".`; return { result, deliver: null }; }
+    const about = setProjectAbout(dir, ab[2]);
+    result.ok = true; result.action = 'answer'; result.message = about ? `Noted for ${path.basename(dir)}: ${about}` : `Cleared the description of ${path.basename(dir)}.`;
+    return { result, deliver: null };
+  }
   const answer = statusAnswer(text);
   if (answer) { result.ok = true; result.action = 'answer'; result.message = answer; return { result, deliver: null }; }
   const req = parseRequest(text);
   if (req.kind === 'launch') {
     const dir = resolveDir(req.dir);
     if (!dir) { result.message = `I can't find a folder called "${req.dir}". Give me a full path or a folder under Downloads, Documents or Desktop.`; return { result, deliver: null }; }
-    result.action = 'launch'; result.message = `Launching a new agent in ${path.basename(dir)}…`; result.ok = true;
+    result.action = 'launch'; result.message = `Launching a new agent in ${path.basename(dir)}…`; result.ok = true; result.dir = dir; // the client selects this project's tab once the agent shows up
     return { result, deliver: async () => {
       const id = await launchAgent(dir); fx('managerTarget', id, { text }); const ready = await waitForPrompt(id);
       let issueId = null;
       const a = agents.get(id);
       if (a && req.role) { a.humanName = pickHumanName(req.role); a.role = req.role; applyRole(a); markDirty(); }
       if (req.prompt && a) { await sleep(ready ? 600 : 0); issueId = await giveTask(a, req.prompt, text); }
+      else if (a && projectAbout(dir)) { await sleep(ready ? 600 : 0); await typeInto(id, `You are joining the project in ${dir}. What Daniel is building: ${projectAbout(dir)}\n\nRead the project briefly so you know your way around, then stop and wait: the floor manager will hand you a task.`); }
       return { targetId: id, message: req.prompt ? `Handed the task to the new ${path.basename(dir)} agent${issueId ? ` and filed it as ${issueId}` : ''}.` : `New agent is up in ${path.basename(dir)}.` };
     } };
   }
@@ -1619,6 +1642,13 @@ const server = http.createServer(async (req, res) => {
     });
   }
   if (url.pathname === '/api/history') return json(res, 200, { reports: reports.slice(-100), chat: chatLog.slice(-100), depts: DEPT_NAMES, issues, beads: beadsOk, skills: Object.fromEntries(Object.entries(DEPT_SKILLS).map(([d, ks]) => [d, ks.map((k) => ({ skill: k.skill, what: k.what }))])) });
+  if (url.pathname === '/api/projects/about' && req.method === 'POST') { // { folder, about }: remember what Daniel is building there
+    const { folder, about } = await readBody(req);
+    const dir = typeof folder === 'string' && folder.trim() ? (knownRoot(folder) ? folder : resolveDir(folder)) : null;
+    if (!dir) return json(res, 404, { ok: false, message: `I can't find a folder called "${String(folder || '').slice(0, 80)}". Give me a full path or a folder under Downloads, Documents or Desktop.` });
+    const saved = setProjectAbout(dir, about);
+    return json(res, 200, { ok: true, root: dir, name: path.basename(dir), about: saved });
+  }
   if (url.pathname === '/api/issues') { // ?project=<root> reads that project's board instead of this repo's
     const root = url.searchParams.get('project');
     if (root && !knownRoot(root)) return json(res, 400, { ok: false, message: 'not a project on the floor' });
